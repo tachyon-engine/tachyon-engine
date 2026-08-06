@@ -23,6 +23,7 @@ sha2 = "0.10"
 tachyon-bytecode = { path = "../../crates/tachyon-bytecode" }
 tachyon-compiler = { path = "../../crates/tachyon-compiler" }
 tachyon-gc = { path = "../../crates/tachyon-gc" }
+tachyon-intl-icu4x = { path = "../../crates/tachyon-intl-icu4x" }
 tachyon-vm = { path = "../../crates/tachyon-vm" }
 toml = "0.8"
 

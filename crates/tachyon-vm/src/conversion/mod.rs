@@ -555,6 +555,23 @@ impl Isolate {
                             text,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::IntlLocaleListLength {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_intl_locale_list_length(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
+                    if continuation.consumer == ConversionConsumer::IntlLocaleListElement {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        let string = self.primitive_to_string_value(value)?;
+                        return self.resume_intl_locale_list_element(
+                            continuation.site,
+                            state,
+                            string,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::AddLeft {
                         let left = value;
                         let right = continuation.receiver;
@@ -1650,6 +1667,10 @@ impl Isolate {
                 | ConversionConsumer::DateToPrimitiveNumber => argument,
                 ConversionConsumer::DateToJson => {
                     unreachable!("Date toJSON resumes inside the conversion state machine")
+                }
+                ConversionConsumer::IntlLocaleListLength
+                | ConversionConsumer::IntlLocaleListElement => {
+                    unreachable!("Intl locale-list conversion resumes inside its state machine")
                 }
                 ConversionConsumer::JsonParseText => {
                     unreachable!("JSON parse text resumes inside the conversion state machine")

@@ -13,6 +13,7 @@ use tachyon_compiler::{
     MediaType, SourceId, SourceMode, SourceName, SourceText,
 };
 use tachyon_gc::HeapLimit;
+use tachyon_intl_icu4x::Icu4xIntlProvider;
 use tachyon_vm::{
     AtomHashSeed, AtomTableConfig, DynamicFunctionKind, DynamicFunctionSource, ExecutionBudget,
     ExecutionError, HostProviderError, HostProviders, Isolate, IsolateConfig, LoadedModule,
@@ -271,6 +272,10 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
         HostProviders::new()
             .with_wall_clock(Test262WallClock::default())
             .with_time_zone(Test262UtcTimeZone)
+            .with_intl(
+                Icu4xIntlProvider::try_new("en-US")
+                    .expect("the fixed Test262 default locale must be valid"),
+            )
             .with_atomics_waiter(agent_controller.waiter())
             .with_agent_host(agent_controller.main_host())
             .with_agent_can_suspend(request.can_block),
@@ -382,6 +387,10 @@ pub(super) fn run_agent_worker(
         HostProviders::new()
             .with_wall_clock(Test262WallClock::default())
             .with_time_zone(Test262UtcTimeZone)
+            .with_intl(
+                Icu4xIntlProvider::try_new("en-US")
+                    .expect("the fixed Test262 default locale must be valid"),
+            )
             .with_atomics_waiter(cluster.waiter())
             .with_agent_host(cluster.worker_host(worker))
             .with_agent_can_suspend(true),

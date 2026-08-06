@@ -11,6 +11,7 @@ mod date;
 mod finalization_registry;
 mod function;
 mod global;
+mod intl;
 mod json;
 mod map_upsert;
 mod math;

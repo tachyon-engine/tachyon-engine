@@ -259,6 +259,10 @@ pub(crate) struct Realm {
     pub(crate) date_value_of: Option<Value>,
     pub(crate) function_constructor: Option<Value>,
     pub(crate) math_object: Option<Value>,
+    pub(crate) intl_object: Option<Value>,
+    pub(crate) intl_locale_constructor: Option<Value>,
+    pub(crate) intl_locale_prototype: Option<Value>,
+    pub(crate) intl_get_canonical_locales: Option<Value>,
     pub(crate) json_object: Option<Value>,
     pub(crate) reflect_object: Option<Value>,
     pub(crate) proxy_constructor: Option<Value>,
@@ -466,6 +470,10 @@ impl Realm {
             date_value_of: None,
             function_constructor: None,
             math_object: None,
+            intl_object: None,
+            intl_locale_constructor: None,
+            intl_locale_prototype: None,
+            intl_get_canonical_locales: None,
             json_object: None,
             reflect_object: None,
             proxy_constructor: None,
@@ -940,6 +948,13 @@ impl Trace for Realm {
         self.date_value_of.trace(tracer);
         self.function_constructor.trace(tracer);
         self.math_object.trace(tracer);
+        self.intl_object.trace(tracer);
+        self.intl_locale_constructor.trace(tracer);
+        self.intl_locale_prototype.trace(tracer);
+        self.intl_get_canonical_locales.trace(tracer);
+        self.json_object.trace(tracer);
+        self.json_parse.trace(tracer);
+        self.json_stringify.trace(tracer);
         self.reflect_object.trace(tracer);
         self.proxy_constructor.trace(tracer);
         self.promise_constructor.trace(tracer);

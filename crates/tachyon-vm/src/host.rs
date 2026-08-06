@@ -170,11 +170,21 @@ pub trait TimeZoneProvider: Send {
     ) -> Result<i64, HostProviderError>;
 }
 
+/// Supplies locale data operations without allowing the VM to read process or filesystem state.
+pub trait IntlProvider: Send {
+    /// Returns one canonical BCP 47 locale, or `None` when the input is structurally invalid.
+    fn canonicalize_locale(&mut self, locale: &str) -> Result<Option<Box<str>>, HostProviderError>;
+
+    /// Returns the provider's canonical default locale.
+    fn default_locale(&mut self) -> Result<Box<str>, HostProviderError>;
+}
+
 /// Isolate-owned host capabilities; absence remains explicit instead of consulting the process.
 #[derive(Default)]
 pub struct HostProviders {
     wall_clock: Option<Box<dyn WallClockProvider>>,
     time_zone: Option<Box<dyn TimeZoneProvider>>,
+    intl: Option<Box<dyn IntlProvider>>,
     atomics_waiter: Option<Box<dyn AtomicsWaiterProvider>>,
     agent_host: Option<Box<dyn AgentHostProvider>>,
     agent_can_suspend: bool,
@@ -186,6 +196,7 @@ impl HostProviders {
         Self {
             wall_clock: None,
             time_zone: None,
+            intl: None,
             atomics_waiter: None,
             agent_host: None,
             agent_can_suspend: false,
@@ -201,6 +212,12 @@ impl HostProviders {
     #[must_use]
     pub fn with_time_zone(mut self, provider: impl TimeZoneProvider + 'static) -> Self {
         self.time_zone = Some(Box::new(provider));
+        self
+    }
+
+    #[must_use]
+    pub fn with_intl(mut self, provider: impl IntlProvider + 'static) -> Self {
+        self.intl = Some(Box::new(provider));
         self
     }
 
@@ -230,6 +247,10 @@ impl HostProviders {
         self.time_zone.as_deref_mut()
     }
 
+    pub(crate) fn intl_mut(&mut self) -> Option<&mut (dyn IntlProvider + 'static)> {
+        self.intl.as_deref_mut()
+    }
+
     pub(crate) fn atomics_waiter_mut(
         &mut self,
     ) -> Option<&mut (dyn AtomicsWaiterProvider + 'static)> {
@@ -251,6 +272,7 @@ impl fmt::Debug for HostProviders {
             .debug_struct("HostProviders")
             .field("wall_clock", &self.wall_clock.is_some())
             .field("time_zone", &self.time_zone.is_some())
+            .field("intl", &self.intl.is_some())
             .field("atomics_waiter", &self.atomics_waiter.is_some())
             .field("agent_host", &self.agent_host.is_some())
             .field("agent_can_suspend", &self.agent_can_suspend)

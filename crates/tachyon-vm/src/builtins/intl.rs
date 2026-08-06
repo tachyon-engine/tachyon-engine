@@ -1,0 +1,516 @@
+//! Provider-backed Intl locale-list canonicalization.
+
+use super::super::*;
+
+const LOCALE_RECEIVER: usize = 0;
+const LOCALE_RESULT: usize = 1;
+const LOCALE_LENGTH: usize = 2;
+const LOCALE_NEXT_INDEX: usize = 3;
+const LOCALE_RESULT_COUNT: usize = 4;
+
+struct IntlLocaleListRoots<'a> {
+    vm: VmRoots<'a>,
+    pending: NativeCallState,
+}
+
+impl Trace for IntlLocaleListRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.pending.trace(tracer);
+    }
+}
+
+impl Isolate {
+    /// Constructs the initial `Intl.Locale` internal-slot surface used by locale-list consumers.
+    pub(crate) fn create_intl_locale_from_site(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        if !self.is_object_value(site.new_target) {
+            return Err(ExecutionError::NonConstructor(site.callee));
+        }
+        let tag = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let tag = if self.is_string_value(tag) {
+            tag
+        } else if tag.as_heap_ref().is_some_and(|raw| {
+            self.heap
+                .checked_reference(raw, self.types.string_object)
+                .is_ok()
+        }) {
+            self.string_primitive_value(tag)?
+        } else if self.is_object_value(tag) {
+            return Err(ExecutionError::InvalidLocaleListElement(tag));
+        } else {
+            self.primitive_to_string_value(tag)?
+        };
+        let mut canonical = self.canonicalize_intl_locale_text(tag)?;
+        let options = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if options.as_immediate() != Some(Immediate::Undefined) {
+            let options = self.coerce_to_object(options)?;
+            let calendar_atom = self.intern_intrinsic_name(b"calendar")?;
+            let calendar = self
+                .get_data_property(options, calendar_atom)?
+                .unwrap_or(Value::from_immediate(Immediate::Undefined));
+            if calendar.as_immediate() != Some(Immediate::Undefined) {
+                let calendar = if self.is_string_value(calendar) {
+                    calendar
+                } else if self.is_object_value(calendar) {
+                    return Err(ExecutionError::InvalidLocaleListElement(calendar));
+                } else {
+                    self.primitive_to_string_value(calendar)?
+                };
+                let calendar = self.string_value_to_ascii(calendar)?;
+                let mut combined = String::new();
+                combined
+                    .try_reserve_exact(canonical.len() + 6 + calendar.len())
+                    .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+                combined.push_str(&canonical);
+                combined.push_str("-u-ca-");
+                combined.push_str(&calendar);
+                canonical = self.canonicalize_intl_ascii_tag(&combined)?;
+            }
+        }
+        let value = self.allocate_runtime_string(
+            JsString::try_from_str(&canonical).map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        let prototype = self
+            .realm
+            .intl_locale_prototype
+            .expect("Intl.Locale prototype initializes before construction");
+        let locale = self.allocate_string_object(value, prototype, AllocationSpace::Young)?;
+        self.write(site.caller_base, site.destination, locale)
+    }
+
+    /// Returns the canonical tag retained by the current minimal `[[InitializedLocale]]` carrier.
+    pub(crate) fn intl_locale_to_string(
+        &mut self,
+        receiver: Value,
+    ) -> Result<Value, ExecutionError> {
+        let raw = receiver
+            .as_heap_ref()
+            .ok_or(ExecutionError::InvalidLocaleListElement(receiver))?;
+        self.heap
+            .checked_reference(raw, self.types.string_object)
+            .map_err(|_| ExecutionError::InvalidLocaleListElement(receiver))?;
+        self.string_primitive_value(receiver)
+    }
+
+    /// Starts `Intl.getCanonicalLocales`, preserving every observable array-like access.
+    pub(crate) fn begin_intl_get_canonical_locales(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let locales = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let result = self.create_array_object_with_prototype(
+            self.realm
+                .array_prototype
+                .expect("Array prototype initializes before Intl"),
+        )?;
+        if locales.as_immediate() == Some(Immediate::Undefined) {
+            return self.write(site.caller_base, site.destination, result);
+        }
+        let site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        if self.is_string_value(locales) {
+            let state = self.allocate_intl_locale_list_state(locales, result)?;
+            self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_heap_ref(state.raw()),
+            )?;
+            return self.resume_intl_locale_list_element(site, state, locales);
+        }
+        let receiver = self.coerce_to_object(locales)?;
+        let state = self.allocate_intl_locale_list_state(receiver, result)?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        let length = self.length_atom()?;
+        let observed = self.dispatch_intl_locale_get(
+            site,
+            state,
+            IntlLocaleListStage::Length,
+            receiver,
+            length.into(),
+        )?;
+        if let Some(observed) = observed {
+            self.resume_intl_locale_list(site, state, IntlLocaleListStage::Length, observed)?;
+        }
+        Ok(())
+    }
+
+    /// Resumes one observable locale-list length, membership, or element read.
+    pub(crate) fn resume_intl_locale_list(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        stage: IntlLocaleListStage,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        match stage {
+            IntlLocaleListStage::Length => {
+                if self.is_object_value(value) {
+                    return self.dispatch_object_primitive_conversion(
+                        ConversionConsumer::IntlLocaleListLength,
+                        site.caller_base,
+                        site.destination,
+                        Value::from_heap_ref(state.raw()),
+                        value,
+                        site.call_site,
+                    );
+                }
+                self.resume_intl_locale_list_length(site, state, value)
+            }
+            IntlLocaleListStage::Has => {
+                if self.is_truthy_value(value)? {
+                    let snapshot = self.native_call_state_snapshot(state)?;
+                    let index =
+                        intl_exact_nonnegative_integer(snapshot.values[LOCALE_NEXT_INDEX])? - 1;
+                    let key = self.property_key_atom(safe_integer_value(index))?;
+                    let observed = self.dispatch_intl_locale_get(
+                        site,
+                        state,
+                        IntlLocaleListStage::Get,
+                        snapshot.values[LOCALE_RECEIVER],
+                        key.into(),
+                    )?;
+                    if let Some(observed) = observed {
+                        self.resume_intl_locale_list(
+                            site,
+                            state,
+                            IntlLocaleListStage::Get,
+                            observed,
+                        )?;
+                    }
+                    Ok(())
+                } else {
+                    self.advance_intl_locale_list(site, state)
+                }
+            }
+            IntlLocaleListStage::Get => self.consume_intl_locale_list_element(site, state, value),
+        }
+    }
+
+    /// Applies ToLength after the observable `length` read and starts indexed traversal.
+    pub(crate) fn resume_intl_locale_list_length(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let number = self.convert_to_number(value)?;
+        let number =
+            numeric_value(number).ok_or(ExecutionError::UnsupportedNumberConversion(number))?;
+        let length = if number.is_nan() || number <= 0.0 {
+            0
+        } else if !number.is_finite() || number >= MAX_SAFE_INTEGER as f64 {
+            MAX_SAFE_INTEGER
+        } else {
+            number.floor() as u64
+        };
+        self.update_native_call_state_value(state, LOCALE_LENGTH, safe_integer_value(length))?;
+        self.advance_intl_locale_list(site, state)
+    }
+
+    /// Converts one permitted String/Object element and resumes canonicalization.
+    fn consume_intl_locale_list_element(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        if self.is_string_value(value) {
+            return self.resume_intl_locale_list_element(site, state, value);
+        }
+        if !self.is_object_value(value) {
+            return Err(ExecutionError::InvalidLocaleListElement(value));
+        }
+        self.dispatch_object_primitive_conversion(
+            ConversionConsumer::IntlLocaleListElement,
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+            value,
+            site.call_site,
+        )
+    }
+
+    /// Calls the provider, removes duplicates by canonical String value, and advances the list.
+    pub(crate) fn resume_intl_locale_list_element(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        self.canonicalize_and_append_locale(site, state, value)?;
+        self.advance_intl_locale_list(site, state)
+    }
+
+    /// Canonicalizes one already-string element and appends it only when not already present.
+    fn canonicalize_and_append_locale(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        let canonical = self.canonicalize_intl_locale_text(value)?;
+        let canonical = self.allocate_runtime_string(
+            JsString::try_from_str(&canonical).map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        let snapshot = self.native_call_state_snapshot(state)?;
+        let count = intl_exact_nonnegative_integer(snapshot.values[LOCALE_RESULT_COUNT])?;
+        for index in 0..count {
+            let key = self.property_key_atom(safe_integer_value(index))?;
+            let existing = self
+                .get_data_property(snapshot.values[LOCALE_RESULT], key)?
+                .ok_or(ExecutionError::MissingNativeContinuation)?;
+            if self.strict_equal_values(existing, canonical)? {
+                return Ok(());
+            }
+        }
+        let key = self.property_key_atom(safe_integer_value(count))?;
+        self.set_own_data_property(snapshot.values[LOCALE_RESULT], key, canonical)?;
+        self.update_native_call_state_value(
+            state,
+            LOCALE_RESULT_COUNT,
+            safe_integer_value(count + 1),
+        )
+    }
+
+    /// Converts a managed ECMAScript String into an ASCII BCP 47 input and calls the provider.
+    fn canonicalize_intl_locale_text(&mut self, value: Value) -> Result<Box<str>, ExecutionError> {
+        let tag = self.string_value_to_ascii(value)?;
+        self.canonicalize_intl_ascii_tag(&tag)
+    }
+
+    fn string_value_to_ascii(&mut self, value: Value) -> Result<String, ExecutionError> {
+        let units = self.string_value_to_utf16(value)?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(units.len())
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        for unit in units {
+            let byte = u8::try_from(unit).map_err(|_| ExecutionError::InvalidLanguageTag)?;
+            if !byte.is_ascii() {
+                return Err(ExecutionError::InvalidLanguageTag);
+            }
+            bytes.push(byte);
+        }
+        String::from_utf8(bytes).map_err(|_| ExecutionError::InvalidLanguageTag)
+    }
+
+    fn canonicalize_intl_ascii_tag(&mut self, tag: &str) -> Result<Box<str>, ExecutionError> {
+        self.host_providers
+            .intl_mut()
+            .ok_or(ExecutionError::MissingIntlProvider)?
+            .canonicalize_locale(tag)
+            .map_err(ExecutionError::IntlProvider)?
+            .ok_or(ExecutionError::InvalidLanguageTag)
+    }
+
+    /// Iterates synchronously until a Proxy/accessor suspends or every index has been visited.
+    fn advance_intl_locale_list(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+    ) -> Result<(), ExecutionError> {
+        loop {
+            self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_heap_ref(state.raw()),
+            )?;
+            let snapshot = self.native_call_state_snapshot(state)?;
+            let length = intl_exact_nonnegative_integer(snapshot.values[LOCALE_LENGTH])?;
+            let index = intl_exact_nonnegative_integer(snapshot.values[LOCALE_NEXT_INDEX])?;
+            if index >= length {
+                return self.write(
+                    site.caller_base,
+                    site.destination,
+                    snapshot.values[LOCALE_RESULT],
+                );
+            }
+            self.update_native_call_state_value(
+                state,
+                LOCALE_NEXT_INDEX,
+                safe_integer_value(index + 1),
+            )?;
+            let key = safe_integer_value(index);
+            let observed =
+                self.dispatch_intl_locale_has(site, state, snapshot.values[LOCALE_RECEIVER], key)?;
+            let Some(observed) = observed else {
+                return Ok(());
+            };
+            if !self.is_truthy_value(observed)? {
+                continue;
+            }
+            let key = self.property_key_atom(key)?;
+            let observed = self.dispatch_intl_locale_get(
+                site,
+                state,
+                IntlLocaleListStage::Get,
+                snapshot.values[LOCALE_RECEIVER],
+                key.into(),
+            )?;
+            let Some(observed) = observed else {
+                return Ok(());
+            };
+            if self.is_string_value(observed) {
+                self.canonicalize_and_append_locale(site, state, observed)?;
+                continue;
+            }
+            if self.is_object_value(observed) {
+                self.dispatch_object_primitive_conversion(
+                    ConversionConsumer::IntlLocaleListElement,
+                    site.caller_base,
+                    site.destination,
+                    Value::from_heap_ref(state.raw()),
+                    observed,
+                    site.call_site,
+                )?;
+                return Ok(());
+            }
+            return Err(ExecutionError::InvalidLocaleListElement(observed));
+        }
+    }
+
+    /// Dispatches one Proxy-aware Get while retaining the locale-list state as its parent.
+    fn dispatch_intl_locale_get(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        stage: IntlLocaleListStage,
+        receiver: Value,
+        key: PropertyKey,
+    ) -> Result<Option<Value>, ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.push_intl_locale_parent(site, state, stage, receiver)?;
+        let outcome = self.dispatch_proxy_aware_property_read(site, receiver, receiver, key);
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() == completion_depth
+        {
+            return Ok(None);
+        }
+        self.pop_native_continuation()?;
+        self.read(site.caller_base, site.destination).map(Some)
+    }
+
+    /// Dispatches one Proxy-aware HasProperty while retaining the locale-list state as parent.
+    fn dispatch_intl_locale_has(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        receiver: Value,
+        key: Value,
+    ) -> Result<Option<Value>, ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.push_intl_locale_parent(site, state, IntlLocaleListStage::Has, key)?;
+        let outcome = self.dispatch_has_property(site, receiver, key);
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() == completion_depth
+        {
+            return Ok(None);
+        }
+        self.pop_native_continuation()?;
+        self.read(site.caller_base, site.destination).map(Some)
+    }
+
+    fn push_intl_locale_parent(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        stage: IntlLocaleListStage,
+        retained: Value,
+    ) -> Result<(), ExecutionError> {
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::intl_locale_list(
+                site,
+                stage,
+                Value::from_heap_ref(state.raw()),
+                retained,
+            ))
+            .map_err(Isolate::completion_stack_error)
+    }
+
+    /// Allocates fixed traced state without retaining a Rust collection across callbacks.
+    fn allocate_intl_locale_list_state(
+        &mut self,
+        receiver: Value,
+        result: Value,
+    ) -> Result<GcRef<NativeCallState>, ExecutionError> {
+        let pending = NativeCallState {
+            values: [
+                receiver,
+                result,
+                Value::from_i32(0),
+                Value::from_i32(0),
+                Value::from_i32(0),
+            ],
+            count: 5,
+        };
+        let mut roots = IntlLocaleListRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
+                loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
+            },
+            pending,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.native_call_state,
+                0,
+                0,
+                roots.pending,
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)
+    }
+}
+
+#[inline(always)]
+fn intl_exact_nonnegative_integer(value: Value) -> Result<u64, ExecutionError> {
+    let number = numeric_value(value).ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+    if number < 0.0 || number.fract() != 0.0 || number > MAX_SAFE_INTEGER as f64 {
+        return Err(ExecutionError::UnsupportedNumberConversion(value));
+    }
+    Ok(number as u64)
+}

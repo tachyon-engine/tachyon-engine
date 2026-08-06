@@ -2634,6 +2634,9 @@ impl Isolate {
             NativeContinuationKind::ArrayForEach(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::IntlLocaleList(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::TypedArrayCallback(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -5385,6 +5388,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::DateConstructor) => {
                     return self.begin_date_constructor(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::IntlLocaleConstructor) => {
+                    return self.create_intl_locale_from_site(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
                     let object = self.construct_object_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, object);
@@ -7915,6 +7921,16 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::WrapForValidIteratorReturn) => {
                     return self.begin_wrap_for_valid_iterator_return(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::IntlGetCanonicalLocales) => {
+                    return self.begin_intl_get_canonical_locales(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlLocaleConstructor) => {
+                    return self.create_intl_locale_from_site(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlLocaleToString) => {
+                    let value = self.intl_locale_to_string(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::JsonParse) => {
                     return self.begin_json_parse(&site);
                 }
@@ -8773,6 +8789,10 @@ impl Isolate {
                 NativeContinuationKind::ArrayForEach(stage) => {
                     let state = self.native_call_state_reference(continuation.first())?;
                     self.resume_array_for_each(site, state, stage, value, continuation.second())
+                }
+                NativeContinuationKind::IntlLocaleList(stage) => {
+                    let state = self.native_call_state_reference(continuation.first())?;
+                    self.resume_intl_locale_list(site, state, stage, value)
                 }
                 NativeContinuationKind::TypedArrayCallback(stage) => {
                     let state = self.native_call_state_reference(continuation.first())?;

@@ -48,12 +48,13 @@ impl ProgressObserver for StderrProgress {
     }
 }
 
-const ENGINE_CRATES: [&str; 6] = [
+const ENGINE_CRATES: [&str; 7] = [
     "tachyon-value",
     "tachyon-bytecode",
     "tachyon-gc",
     "tachyon-compiler",
     "tachyon-vm",
+    "tachyon-intl-icu4x",
     "tachyon",
 ];
 

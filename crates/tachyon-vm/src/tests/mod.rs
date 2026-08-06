@@ -61,6 +61,7 @@ mod generator;
 mod grouping;
 mod host_agent;
 mod instance_of;
+mod intl;
 mod iterator_flat_map;
 mod iterator_intrinsics;
 mod math_conversion;

@@ -771,6 +771,9 @@ pub(crate) enum NativeFunction {
     FinalizationRegistryConstructor,
     FinalizationRegistryRegister,
     FinalizationRegistryUnregister,
+    IntlLocaleConstructor,
+    IntlLocaleToString,
+    IntlGetCanonicalLocales,
     JsonParse,
     JsonStringify,
     MathAbs,
@@ -1136,6 +1139,7 @@ impl NativeFunction {
                 | Self::WeakSetConstructor
                 | Self::WeakRefConstructor
                 | Self::FinalizationRegistryConstructor
+                | Self::IntlLocaleConstructor
         )
     }
 
@@ -1565,6 +1569,8 @@ impl NativeFunction {
             | Self::SymbolDescription
             | Self::NumberToLocaleString => 0,
             Self::SymbolToPrimitive => 1,
+            Self::IntlLocaleConstructor | Self::IntlGetCanonicalLocales => 1,
+            Self::IntlLocaleToString => 0,
             Self::JsonParse => 2,
             Self::JsonStringify => 3,
             Self::HostCreateRealm => 0,
@@ -1980,6 +1986,9 @@ impl NativeFunction {
             Self::FinalizationRegistryConstructor => "FinalizationRegistry",
             Self::FinalizationRegistryRegister => "register",
             Self::FinalizationRegistryUnregister => "unregister",
+            Self::IntlLocaleConstructor => "Locale",
+            Self::IntlLocaleToString => "toString",
+            Self::IntlGetCanonicalLocales => "getCanonicalLocales",
             Self::JsonParse => "parse",
             Self::JsonStringify => "stringify",
             Self::HostCreateRealm => "createRealm",
@@ -2676,6 +2685,7 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) date: AtomId,
     pub(crate) function: AtomId,
     pub(crate) math: AtomId,
+    pub(crate) intl: AtomId,
     pub(crate) json: AtomId,
     pub(crate) reflect: AtomId,
     pub(crate) proxy: AtomId,
@@ -2687,7 +2697,7 @@ pub(crate) struct RealmIntrinsicAtoms {
 }
 
 impl RealmIntrinsicAtoms {
-    pub(crate) const BINDING_COUNT: usize = 31
+    pub(crate) const BINDING_COUNT: usize = 32
         + TypedArrayKind::ALL.len()
         + NativeErrorKind::ALL.len()
         + GlobalNumberFunction::ALL.len()
@@ -2746,6 +2756,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::AtomicsWaitCannotSuspend
         | ExecutionError::InvalidDatePrimitiveHint(_)
         | ExecutionError::InvalidJsonCircularStructure
+        | ExecutionError::InvalidLocaleListElement(_)
         | ExecutionError::TypedArraySpeciesResultTooShort
         | ExecutionError::DetachedArrayBuffer
         | ExecutionError::FixedLengthSharedArrayBuffer
@@ -2773,7 +2784,8 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::JsonSerializationDepthExceeded
         | ExecutionError::InvalidStringRepeatCount(_)
         | ExecutionError::NegativeSetSize(_)
-        | ExecutionError::InvalidNormalizationForm => Some(NativeErrorKind::Range),
+        | ExecutionError::InvalidNormalizationForm
+        | ExecutionError::InvalidLanguageTag => Some(NativeErrorKind::Range),
         ExecutionError::InvalidUriEncoding => Some(NativeErrorKind::Uri),
         _ => None,
     }

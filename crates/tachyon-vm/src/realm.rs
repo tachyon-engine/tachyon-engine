@@ -51,6 +51,7 @@ impl Isolate {
         self.initialize_weak_ref_intrinsics()?;
         self.initialize_finalization_registry_intrinsics()?;
         self.initialize_math_intrinsics()?;
+        self.initialize_intl_intrinsics()?;
         self.initialize_json_intrinsics()?;
         self.initialize_reflect_intrinsics()?;
         self.initialize_proxy_intrinsics()?;
@@ -2202,6 +2203,7 @@ impl Isolate {
             date: self.intern_intrinsic_name(b"Date")?,
             function: self.intern_intrinsic_name(b"Function")?,
             math: self.intern_intrinsic_name(b"Math")?,
+            intl: self.intern_intrinsic_name(b"Intl")?,
             json: self.intern_intrinsic_name(b"JSON")?,
             reflect: self.intern_intrinsic_name(b"Reflect")?,
             proxy: self.intern_intrinsic_name(b"Proxy")?,
@@ -3981,6 +3983,106 @@ impl Isolate {
         )
     }
 
+    /// Builds the non-constructor Intl namespace while locale data remains host-provided.
+    fn initialize_intl_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let object_prototype = self
+            .realm
+            .object_prototype
+            .expect("Object prototype initializes before Intl");
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("Function prototype initializes before Intl methods");
+        let object = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        self.realm.intl_object = Some(object);
+        let locale_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        self.realm.intl_locale_prototype = Some(locale_prototype);
+        let locale_constructor = self.allocate_native_function(
+            NativeFunction::IntlLocaleConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.intl_locale_constructor = Some(locale_constructor);
+        self.set_function_prototype(locale_constructor, locale_prototype)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.set_intrinsic_data_property(
+            locale_prototype,
+            constructor_atom,
+            locale_constructor,
+            true,
+        )?;
+        let locale_atom = self.intern_intrinsic_name(b"Locale")?;
+        self.set_intrinsic_data_property(object, locale_atom, locale_constructor, true)?;
+        let locale_to_string = self.allocate_native_function(
+            NativeFunction::IntlLocaleToString,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let to_string_atom = self.intern_intrinsic_name(b"toString")?;
+        self.set_intrinsic_data_property(locale_prototype, to_string_atom, locale_to_string, true)?;
+        let method = self.allocate_native_function(
+            NativeFunction::IntlGetCanonicalLocales,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.intl_get_canonical_locales = Some(method);
+        let method_atom = self.intern_intrinsic_name(b"getCanonicalLocales")?;
+        self.set_intrinsic_data_property(object, method_atom, method, true)?;
+        let tag_symbol = self
+            .agent
+            .well_known_symbols
+            .to_string_tag
+            .expect("Symbol.toStringTag initializes before Intl");
+        let tag_key = self.property_key(tag_symbol)?;
+        let tag_atom = self.intern_intrinsic_name(b"Intl")?;
+        let tag_value = self.atom_string_value(tag_atom)?;
+        self.define_data_property(
+            object,
+            tag_key,
+            DataPropertyDescriptor {
+                value: Some(tag_value),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+        let locale_tag = self.allocate_runtime_string(
+            JsString::try_from_latin1(b"Intl.Locale").map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        self.define_data_property(
+            locale_prototype,
+            tag_key,
+            DataPropertyDescriptor {
+                value: Some(locale_tag),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )
+    }
+
     /// Builds the non-constructor JSON namespace and its UTF-16 parser entry point.
     fn initialize_json_intrinsics(&mut self) -> Result<(), ExecutionError> {
         let object = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
@@ -4686,6 +4788,13 @@ impl Isolate {
             self.realm
                 .math_object
                 .expect("Math initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.intl,
+            self.realm
+                .intl_object
+                .expect("Intl initializes before global publication"),
             true,
         )?;
         self.realm.publish_intrinsic(

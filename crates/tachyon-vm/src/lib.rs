@@ -102,7 +102,8 @@ pub use finalization::{
 pub use host::{
     AgentBroadcast, AgentBroadcastValue, AgentHostProvider, AtomicsAsyncWait,
     AtomicsAsyncWaitStart, AtomicsWaitLocation, AtomicsWaitResult, AtomicsWaiterProvider,
-    HostProviderError, HostProviders, SharedMemoryId, TimeZoneProvider, WallClockProvider,
+    HostProviderError, HostProviders, IntlProvider, SharedMemoryId, TimeZoneProvider,
+    WallClockProvider,
 };
 pub use isolate::Isolate;
 pub use module::{
@@ -319,8 +320,8 @@ use runtime::{
         ConversionConsumer, ConversionContinuation, ConversionNativeFunction,
         CopyDataPropertiesStage, DateToJsonStage, DefinePropertiesStage, ErrorConstructorStage,
         ErrorStackSetterStage, ErrorToStringStage, EvalVarEnvironment, Fiber, Frame,
-        GetOwnPropertyDescriptorsStage, InstanceElementStage, InstanceOfStage, IteratorEagerStage,
-        IteratorFromStage, IteratorHelperStage, IteratorPrototypeSetterKey,
+        GetOwnPropertyDescriptorsStage, InstanceElementStage, InstanceOfStage, IntlLocaleListStage,
+        IteratorEagerStage, IteratorFromStage, IteratorHelperStage, IteratorPrototypeSetterKey,
         IteratorPrototypeSetterStage, JsonStringifyStage, MathSumPreciseStage, NativeContinuation,
         NativeContinuationKind, NativeContinuationSite, ObjectLookupAccessorStage,
         ObjectToLocaleStringStage, PreferredType, PromiseCatchStage, PromiseFinallyMethodStage,
@@ -469,6 +470,8 @@ pub enum ExecutionError {
     WallClockProvider(HostProviderError),
     MissingTimeZoneProvider,
     TimeZoneProvider(HostProviderError),
+    MissingIntlProvider,
+    IntlProvider(HostProviderError),
     MissingAtomicsWaiterProvider,
     AtomicsWaiterProvider(HostProviderError),
     MissingAgentHostProvider,
@@ -553,6 +556,8 @@ pub enum ExecutionError {
     InvalidStringLength,
     InvalidStringRepeatCount(Value),
     InvalidNormalizationForm,
+    InvalidLanguageTag,
+    InvalidLocaleListElement(Value),
     InvalidUriEncoding,
     UnsupportedTypeof(Value),
     InvalidCode(CodeId),

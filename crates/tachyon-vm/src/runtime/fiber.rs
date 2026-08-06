@@ -352,6 +352,8 @@ pub(crate) enum ConversionConsumer {
     DateToPrimitiveString,
     DateToPrimitiveNumber,
     DateToJson,
+    IntlLocaleListLength,
+    IntlLocaleListElement,
     JsonParseText,
     JsonStringifyNumberSpace,
     JsonStringifyStringSpace,
@@ -505,6 +507,8 @@ impl ConversionConsumer {
             | Self::DateToPrimitiveString
             | Self::DateToPrimitiveNumber
             | Self::DateToJson
+            | Self::IntlLocaleListLength
+            | Self::IntlLocaleListElement
             | Self::JsonParseText
             | Self::JsonStringifyNumberSpace
             | Self::JsonStringifyStringSpace
@@ -654,6 +658,7 @@ impl ConversionConsumer {
                 | Self::ErrorToStringMessage
                 | Self::DynamicFunctionArgument
                 | Self::DateToPrimitiveString
+                | Self::IntlLocaleListElement
                 | Self::JsonParseText
                 | Self::JsonStringifyStringSpace
                 | Self::JsonStringifyStringValue
@@ -737,6 +742,8 @@ impl ConversionConsumer {
                 | Self::DateToPrimitiveString
                 | Self::DateToPrimitiveNumber
                 | Self::DateToJson
+                | Self::IntlLocaleListLength
+                | Self::IntlLocaleListElement
                 | Self::JsonParseText
                 | Self::JsonStringifyNumberSpace
                 | Self::JsonStringifyStringSpace
@@ -1699,6 +1706,15 @@ pub(crate) enum JsonStringifyStage {
     ObjectDescriptor,
 }
 
+/// Observable boundaries in `CanonicalizeLocaleList`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum IntlLocaleListStage {
+    Length,
+    Has,
+    Get,
+}
+
 /// Observable boundaries in the Async-from-Sync iterator algorithms.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1823,6 +1839,7 @@ pub(crate) enum NativeContinuationKind {
     TypedArraySet(TypedArraySetStage),
     TypedArraySlice(TypedArraySliceStage),
     TypedArraySubarray(TypedArraySubarrayStage),
+    IntlLocaleList(IntlLocaleListStage),
     JsonStringify(JsonStringifyStage),
     JsonParseReviver,
     SignalState(SignalStateStage),
@@ -1864,6 +1881,22 @@ pub(crate) struct NativeContinuation {
 }
 
 impl NativeContinuation {
+    /// Roots the locale-list state across one observable Get or HasProperty operation.
+    #[inline]
+    pub(crate) const fn intl_locale_list(
+        site: NativeContinuationSite,
+        stage: IntlLocaleListStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::IntlLocaleList(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
     /// Roots an unpublished generator while its parameter prologue runs synchronously.
     #[inline]
     pub(crate) const fn generator_initialize(

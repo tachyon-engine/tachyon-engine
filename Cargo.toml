@@ -5,6 +5,7 @@ members = [
     "crates/tachyon-gc",
     "crates/tachyon-compiler",
     "crates/tachyon-vm",
+    "crates/tachyon-intl-icu4x",
     "crates/tachyon",
     "tools/tachyon-cli",
     "tools/benchmark-runner",
