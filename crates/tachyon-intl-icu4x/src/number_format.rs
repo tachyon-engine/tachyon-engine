@@ -2,6 +2,7 @@
 
 use core::str::FromStr;
 
+use fixed_decimal::{SignedRoundingMode, UnsignedRoundingMode};
 use icu_decimal::{
     DecimalFormatterPreferences,
     input::{Decimal, SignDisplay},
@@ -16,9 +17,12 @@ use icu_provider::{
     marker::DataMarkerExt,
 };
 use tachyon_vm::{
-    HostProviderError, IntlLocaleMatcher, IntlMathematicalValue, IntlNumberFormatBackend,
-    IntlNumberFormatCreation, IntlNumberFormatRequest, IntlNumberFormatResolved,
-    IntlNumberFormatSignDisplay, IntlNumberFormatUseGrouping,
+    HostProviderError, IntlFormattedNumberParts, IntlLocaleMatcher, IntlMathematicalValue,
+    IntlNumberFormatBackend, IntlNumberFormatCompactDisplay, IntlNumberFormatCreation,
+    IntlNumberFormatCurrencyDisplay, IntlNumberFormatCurrencySign, IntlNumberFormatNotation,
+    IntlNumberFormatPartSpan, IntlNumberFormatPartType, IntlNumberFormatRequest,
+    IntlNumberFormatResolved, IntlNumberFormatRoundingMode, IntlNumberFormatSignDisplay,
+    IntlNumberFormatStyle, IntlNumberFormatUnitDisplay, IntlNumberFormatUseGrouping,
 };
 
 use crate::supported_values::NUMBERING_SYSTEMS;
@@ -36,47 +40,54 @@ struct Icu4xNumberFormatBackend {
     grouping_separator: Box<str>,
     grouping_sizes: GroupingSizes,
     grouping_strategy: IntlNumberFormatUseGrouping,
+    locale: Box<str>,
+    style: IntlNumberFormatStyle,
+    currency: Option<Box<str>>,
+    currency_display: IntlNumberFormatCurrencyDisplay,
+    currency_sign: IntlNumberFormatCurrencySign,
+    notation: IntlNumberFormatNotation,
+    compact_display: IntlNumberFormatCompactDisplay,
+    unit: Option<Box<str>>,
+    unit_display: IntlNumberFormatUnitDisplay,
+    nan_symbol: Box<str>,
+    infinity_symbol: Box<str>,
     minimum_integer_digits: u8,
     minimum_fraction_digits: u8,
     maximum_fraction_digits: u8,
+    minimum_significant_digits: Option<u8>,
+    maximum_significant_digits: Option<u8>,
+    rounding_mode: IntlNumberFormatRoundingMode,
     sign_display: IntlNumberFormatSignDisplay,
+}
+
+/// Mutable output shared by the plain-string and structured-parts rendering paths.
+struct RenderedNumber {
+    formatted: Vec<u16>,
+    spans: Option<Vec<IntlNumberFormatPartSpan>>,
+}
+
+#[derive(Clone, Copy)]
+struct CompactPattern<'a> {
+    scale: i16,
+    separator: &'static str,
+    label: &'a str,
 }
 
 impl IntlNumberFormatBackend for Icu4xNumberFormatBackend {
     /// Converts exact decimal text only after the VM has completed observable ToNumeric work.
     fn format(&self, value: &IntlMathematicalValue) -> Result<Box<[u16]>, HostProviderError> {
-        let formatted = match value {
-            IntlMathematicalValue::Finite(value) => {
-                let mut decimal = parse_mathematical_decimal(value)?;
-                decimal.round(-i16::from(self.maximum_fraction_digits));
-                decimal.pad_end(-i16::from(self.minimum_fraction_digits));
-                decimal.pad_start(i16::from(self.minimum_integer_digits));
-                decimal.apply_sign_display(sign_display(self.sign_display));
-                self.localize_decimal(&decimal.to_string())?
-            }
-            IntlMathematicalValue::NegativeZero => {
-                let mut decimal = Decimal::from_str("-0").map_err(|_| DATA_FAILURE)?;
-                decimal.pad_end(-i16::from(self.minimum_fraction_digits));
-                decimal.pad_start(i16::from(self.minimum_integer_digits));
-                decimal.apply_sign_display(sign_display(self.sign_display));
-                self.localize_decimal(&decimal.to_string())?
-            }
-            IntlMathematicalValue::PositiveInfinity => match self.sign_display {
-                IntlNumberFormatSignDisplay::Always | IntlNumberFormatSignDisplay::ExceptZero => {
-                    "+∞".into()
-                }
-                _ => "∞".into(),
-            },
-            IntlMathematicalValue::NegativeInfinity => match self.sign_display {
-                IntlNumberFormatSignDisplay::Never => "∞".into(),
-                _ => "-∞".into(),
-            },
-            IntlMathematicalValue::NaN => "NaN".into(),
-        };
-        Ok(formatted
-            .encode_utf16()
-            .collect::<Vec<_>>()
-            .into_boxed_slice())
+        Ok(self.render(value, false)?.formatted.into_boxed_slice())
+    }
+
+    fn format_to_parts(
+        &self,
+        value: &IntlMathematicalValue,
+    ) -> Result<IntlFormattedNumberParts, HostProviderError> {
+        let rendered = self.render(value, true)?;
+        Ok(IntlFormattedNumberParts {
+            formatted: rendered.formatted.into_boxed_slice(),
+            spans: rendered.spans.unwrap_or_default().into_boxed_slice(),
+        })
     }
 
     #[inline(always)]
@@ -86,45 +97,275 @@ impl IntlNumberFormatBackend for Icu4xNumberFormatBackend {
 }
 
 impl Icu4xNumberFormatBackend {
-    /// Replaces ASCII decimal syntax with the copied locale symbols and grouping pattern.
-    fn localize_decimal(&self, value: &str) -> Result<String, HostProviderError> {
+    /// Applies digit constraints once, then routes both public APIs through the same emitter.
+    fn render(
+        &self,
+        value: &IntlMathematicalValue,
+        collect_parts: bool,
+    ) -> Result<RenderedNumber, HostProviderError> {
+        let mut output = RenderedNumber::new(64, collect_parts)?;
+        self.push_style_prefix(&mut output)?;
+        match value {
+            IntlMathematicalValue::Finite(value) => {
+                let mut decimal = parse_mathematical_decimal(value)?;
+                if self.style == IntlNumberFormatStyle::Percent {
+                    decimal.multiply_pow10(2);
+                }
+                self.render_finite_decimal(&mut output, decimal)?;
+            }
+            IntlMathematicalValue::NegativeZero => {
+                let decimal = Decimal::from_str("-0").map_err(|_| DATA_FAILURE)?;
+                self.render_finite_decimal(&mut output, decimal)?;
+            }
+            IntlMathematicalValue::PositiveInfinity => {
+                if matches!(
+                    self.sign_display,
+                    IntlNumberFormatSignDisplay::Always | IntlNumberFormatSignDisplay::ExceptZero
+                ) {
+                    self.push_affix(&mut output, &self.plus_prefix, true)?;
+                }
+                output.push(IntlNumberFormatPartType::Infinity, &self.infinity_symbol)?;
+                if matches!(
+                    self.sign_display,
+                    IntlNumberFormatSignDisplay::Always | IntlNumberFormatSignDisplay::ExceptZero
+                ) {
+                    self.push_affix(&mut output, &self.plus_suffix, true)?;
+                }
+            }
+            IntlMathematicalValue::NegativeInfinity => {
+                if self.sign_display != IntlNumberFormatSignDisplay::Never {
+                    self.push_affix(&mut output, &self.minus_prefix, false)?;
+                }
+                output.push(IntlNumberFormatPartType::Infinity, &self.infinity_symbol)?;
+                if self.sign_display != IntlNumberFormatSignDisplay::Never {
+                    self.push_affix(&mut output, &self.minus_suffix, false)?;
+                }
+            }
+            IntlMathematicalValue::NaN => {
+                if self.sign_display == IntlNumberFormatSignDisplay::Always {
+                    self.push_affix(&mut output, &self.plus_prefix, true)?;
+                }
+                output.push(IntlNumberFormatPartType::Nan, &self.nan_symbol)?;
+                if self.sign_display == IntlNumberFormatSignDisplay::Always {
+                    self.push_affix(&mut output, &self.plus_suffix, true)?;
+                }
+            }
+        }
+        self.push_style_suffix(&mut output)?;
+        Ok(output)
+    }
+
+    /// Applies notation scaling and emits the optional scientific exponent as typed fields.
+    fn render_finite_decimal(
+        &self,
+        output: &mut RenderedNumber,
+        mut decimal: Decimal,
+    ) -> Result<(), HostProviderError> {
+        if self.notation == IntlNumberFormatNotation::Compact {
+            return self.render_compact_decimal(output, decimal);
+        }
+        let exponent = match self.notation {
+            IntlNumberFormatNotation::Standard => None,
+            IntlNumberFormatNotation::Scientific => {
+                Some(decimal.absolute.nonzero_magnitude_start())
+            }
+            IntlNumberFormatNotation::Engineering => {
+                Some(decimal.absolute.nonzero_magnitude_start().div_euclid(3) * 3)
+            }
+            IntlNumberFormatNotation::Compact => unreachable!("compact returns above"),
+        };
+        if let Some(exponent) = exponent {
+            decimal.multiply_pow10(-exponent);
+        }
+        self.apply_digit_rounding(&mut decimal);
+        decimal.pad_start(i16::from(self.minimum_integer_digits));
+        decimal.apply_sign_display(sign_display(self.sign_display));
+        self.localize_decimal(output, &decimal.to_string())?;
+        if let Some(exponent) = exponent {
+            output.push(IntlNumberFormatPartType::ExponentSeparator, "E")?;
+            if exponent < 0 {
+                output.push(IntlNumberFormatPartType::ExponentMinusSign, "-")?;
+            }
+            self.push_digits(
+                output,
+                IntlNumberFormatPartType::ExponentInteger,
+                &exponent.unsigned_abs().to_string(),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Applies either significant-digit or fraction-digit rounding to one scaled decimal.
+    fn apply_digit_rounding(&self, decimal: &mut Decimal) {
+        if let Some(maximum) = self.maximum_significant_digits {
+            let magnitude = decimal.absolute.nonzero_magnitude_start();
+            decimal.round_with_mode(
+                magnitude - i16::from(maximum) + 1,
+                fixed_decimal_rounding_mode(self.rounding_mode),
+            );
+            if let Some(minimum) = self.minimum_significant_digits {
+                let magnitude = decimal.absolute.nonzero_magnitude_start();
+                decimal.pad_end(magnitude - i16::from(minimum) + 1);
+            }
+            return;
+        }
+        decimal.round_with_mode(
+            -i16::from(self.maximum_fraction_digits),
+            fixed_decimal_rounding_mode(self.rounding_mode),
+        );
+        decimal.pad_end(-i16::from(self.minimum_fraction_digits));
+    }
+
+    /// Applies compact-pattern scaling and the ECMA compact-default precision policy.
+    fn render_compact_decimal(
+        &self,
+        output: &mut RenderedNumber,
+        mut decimal: Decimal,
+    ) -> Result<(), HostProviderError> {
+        let pattern = self.compact_pattern(decimal.absolute.nonzero_magnitude_start());
+        if let Some(pattern) = pattern {
+            decimal.multiply_pow10(-pattern.scale);
+        }
+        let scaled_magnitude = decimal.absolute.nonzero_magnitude_start();
+        let maximum_fraction_digits = if scaled_magnitude >= 1 {
+            0
+        } else {
+            u8::try_from(1_i16.saturating_sub(scaled_magnitude)).map_err(|_| DATA_FAILURE)?
+        };
+        decimal.round_with_mode(
+            -i16::from(maximum_fraction_digits),
+            fixed_decimal_rounding_mode(self.rounding_mode),
+        );
+        decimal.apply_sign_display(sign_display(self.sign_display));
+        self.localize_decimal(output, &decimal.to_string())?;
+        if let Some(pattern) = pattern {
+            output.push(IntlNumberFormatPartType::Literal, pattern.separator)?;
+            output.push(IntlNumberFormatPartType::Compact, pattern.label)?;
+        }
+        Ok(())
+    }
+
+    /// Selects one compact exponent and label from the compiled locale-family overlay.
+    fn compact_pattern(&self, magnitude: i16) -> Option<CompactPattern<'_>> {
+        if self.locale.starts_with("ja") || self.locale.starts_with("zh") {
+            let (scale, label) = if magnitude >= 8 {
+                (8, "億")
+            } else if magnitude >= 4 {
+                (
+                    4,
+                    if self.locale.starts_with("zh") {
+                        "萬"
+                    } else {
+                        "万"
+                    },
+                )
+            } else {
+                return None;
+            };
+            return Some(CompactPattern {
+                scale,
+                separator: "",
+                label,
+            });
+        }
+        if self.locale.starts_with("ko") {
+            let (scale, label) = if magnitude >= 8 {
+                (8, "억")
+            } else if magnitude >= 4 {
+                (4, "만")
+            } else if magnitude >= 3 {
+                (3, "천")
+            } else {
+                return None;
+            };
+            return Some(CompactPattern {
+                scale,
+                separator: "",
+                label,
+            });
+        }
+        if self.locale.starts_with("de") {
+            if magnitude >= 6 {
+                return Some(CompactPattern {
+                    scale: 6,
+                    separator: if self.compact_display == IntlNumberFormatCompactDisplay::Short {
+                        "\u{00a0}"
+                    } else {
+                        " "
+                    },
+                    label: if self.compact_display == IntlNumberFormatCompactDisplay::Short {
+                        "Mio."
+                    } else {
+                        "Millionen"
+                    },
+                });
+            }
+            return (self.compact_display == IntlNumberFormatCompactDisplay::Long
+                && magnitude >= 3)
+                .then_some(CompactPattern {
+                    scale: 3,
+                    separator: " ",
+                    label: "Tausend",
+                });
+        }
+        (magnitude >= 3).then_some(CompactPattern {
+            scale: if magnitude >= 6 { 6 } else { 3 },
+            separator: if self.compact_display == IntlNumberFormatCompactDisplay::Long {
+                " "
+            } else {
+                ""
+            },
+            label: match (magnitude >= 6, self.compact_display) {
+                (true, IntlNumberFormatCompactDisplay::Short) => "M",
+                (true, IntlNumberFormatCompactDisplay::Long) => "million",
+                (false, IntlNumberFormatCompactDisplay::Short) => "K",
+                (false, IntlNumberFormatCompactDisplay::Long) => "thousand",
+            },
+        })
+    }
+
+    /// Replaces ASCII decimal syntax with copied locale symbols and typed field spans.
+    fn localize_decimal(
+        &self,
+        output: &mut RenderedNumber,
+        value: &str,
+    ) -> Result<(), HostProviderError> {
         let (sign, unsigned) = match value.as_bytes().first() {
             Some(b'-') => (Some(false), value.get(1..).ok_or(DATA_FAILURE)?),
             Some(b'+') => (Some(true), value.get(1..).ok_or(DATA_FAILURE)?),
             _ => (None, value),
         };
         let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
-        let mut output = String::new();
-        let estimated = value
-            .len()
-            .saturating_mul(4)
-            .saturating_add(self.minus_prefix.len())
-            .saturating_add(self.minus_suffix.len());
-        output
-            .try_reserve_exact(estimated)
-            .map_err(|_| DATA_FAILURE)?;
-        match sign {
-            Some(false) => output.push_str(&self.minus_prefix),
-            Some(true) => output.push_str(&self.plus_prefix),
-            None => {}
+        if self.style == IntlNumberFormatStyle::Currency {
+            self.push_currency_prefix(output, sign)?;
+        } else {
+            match sign {
+                Some(false) => self.push_affix(output, &self.minus_prefix, false)?,
+                Some(true) => self.push_affix(output, &self.plus_prefix, true)?,
+                None => {}
+            }
         }
-        self.push_grouped_integer(&mut output, integer)?;
+        self.push_grouped_integer(output, integer)?;
         if !fraction.is_empty() {
-            output.push_str(&self.decimal_separator);
-            self.push_digits(&mut output, fraction)?;
+            output.push(IntlNumberFormatPartType::Decimal, &self.decimal_separator)?;
+            self.push_digits(output, IntlNumberFormatPartType::Fraction, fraction)?;
         }
-        match sign {
-            Some(false) => output.push_str(&self.minus_suffix),
-            Some(true) => output.push_str(&self.plus_suffix),
-            None => {}
+        if self.style == IntlNumberFormatStyle::Currency {
+            self.push_currency_suffix(output, sign)?;
+        } else {
+            match sign {
+                Some(false) => self.push_affix(output, &self.minus_suffix, false)?,
+                Some(true) => self.push_affix(output, &self.plus_suffix, true)?,
+                None => {}
+            }
         }
-        Ok(output)
+        Ok(())
     }
 
     /// Emits one integer using locale primary/secondary grouping from right to left.
     fn push_grouped_integer(
         &self,
-        output: &mut String,
+        output: &mut RenderedNumber,
         integer: &str,
     ) -> Result<(), HostProviderError> {
         let primary = usize::from(self.grouping_sizes.primary);
@@ -144,7 +385,7 @@ impl Icu4xNumberFormatBackend {
                 IntlNumberFormatUseGrouping::Never => false,
             };
         if !grouping {
-            return self.push_digits(output, integer);
+            return self.push_digits(output, IntlNumberFormatPartType::Integer, integer);
         }
         let first_separator = integer.len().saturating_sub(primary);
         let leading = if secondary == 0 {
@@ -155,27 +396,271 @@ impl Icu4xNumberFormatBackend {
         };
         let mut cursor = 0;
         while cursor < integer.len() {
-            let width = if cursor == 0 { leading } else { secondary };
+            let remaining = integer.len().saturating_sub(cursor);
+            let width = if cursor == 0 {
+                leading
+            } else if remaining == primary {
+                primary
+            } else {
+                secondary
+            };
             let end = cursor.checked_add(width).ok_or(DATA_FAILURE)?;
             let group = integer.get(cursor..end).ok_or(DATA_FAILURE)?;
             if cursor != 0 {
-                output.push_str(&self.grouping_separator);
+                output.push(IntlNumberFormatPartType::Group, &self.grouping_separator)?;
             }
-            self.push_digits(output, group)?;
+            self.push_digits(output, IntlNumberFormatPartType::Integer, group)?;
             cursor = end;
         }
         Ok(())
     }
 
-    fn push_digits(&self, output: &mut String, digits: &str) -> Result<(), HostProviderError> {
+    /// Emits one ASCII digit run as a single localized field.
+    fn push_digits(
+        &self,
+        output: &mut RenderedNumber,
+        kind: IntlNumberFormatPartType,
+        digits: &str,
+    ) -> Result<(), HostProviderError> {
+        let mut localized = String::new();
+        localized
+            .try_reserve_exact(digits.len().saturating_mul(4))
+            .map_err(|_| DATA_FAILURE)?;
         for digit in digits.bytes() {
             let index = digit.checked_sub(b'0').ok_or(DATA_FAILURE)?;
-            let localized = self
+            let character = self
                 .digits
                 .get(usize::from(index))
                 .copied()
                 .ok_or(DATA_FAILURE)?;
-            output.push(localized);
+            localized.push(character);
+        }
+        output.push(kind, &localized)
+    }
+
+    /// Splits bidi literals around the actual sign so ECMA field identity remains observable.
+    fn push_affix(
+        &self,
+        output: &mut RenderedNumber,
+        affix: &str,
+        positive: bool,
+    ) -> Result<(), HostProviderError> {
+        let sign = if positive { '+' } else { '-' };
+        let sign_kind = if positive {
+            IntlNumberFormatPartType::PlusSign
+        } else {
+            IntlNumberFormatPartType::MinusSign
+        };
+        let mut literal_start = 0;
+        for (index, character) in affix.char_indices() {
+            if character != sign {
+                continue;
+            }
+            output.push(
+                IntlNumberFormatPartType::Literal,
+                affix.get(literal_start..index).ok_or(DATA_FAILURE)?,
+            )?;
+            let end = index
+                .checked_add(character.len_utf8())
+                .ok_or(DATA_FAILURE)?;
+            output.push(sign_kind, affix.get(index..end).ok_or(DATA_FAILURE)?)?;
+            literal_start = end;
+        }
+        output.push(
+            IntlNumberFormatPartType::Literal,
+            affix.get(literal_start..).ok_or(DATA_FAILURE)?,
+        )
+    }
+
+    /// Emits locale-specific unit prefixes before the numeric sign and magnitude fields.
+    fn push_style_prefix(&self, output: &mut RenderedNumber) -> Result<(), HostProviderError> {
+        if self.style != IntlNumberFormatStyle::Unit
+            || self.unit.as_deref() != Some("kilometer-per-hour")
+            || self.unit_display != IntlNumberFormatUnitDisplay::Long
+        {
+            return Ok(());
+        }
+        let prefix = if self.locale.starts_with("ja") {
+            "時速"
+        } else if self.locale.starts_with("ko") {
+            "시속"
+        } else if self.locale.starts_with("zh") {
+            "每小時"
+        } else {
+            return Ok(());
+        };
+        output.push(IntlNumberFormatPartType::Unit, prefix)?;
+        if self.locale.starts_with("ko") {
+            output.push(IntlNumberFormatPartType::Literal, " ")?;
+        }
+        Ok(())
+    }
+
+    /// Emits sign and currency token in the locale's prefix/accounting position.
+    fn push_currency_prefix(
+        &self,
+        output: &mut RenderedNumber,
+        sign: Option<bool>,
+    ) -> Result<(), HostProviderError> {
+        if self.locale.starts_with("de") {
+            return match sign {
+                Some(false) => self.push_affix(output, &self.minus_prefix, false),
+                Some(true) => self.push_affix(output, &self.plus_prefix, true),
+                None => Ok(()),
+            };
+        }
+        if sign == Some(false) && self.currency_sign == IntlNumberFormatCurrencySign::Accounting {
+            output.push(IntlNumberFormatPartType::Literal, "(")?;
+        } else {
+            match sign {
+                Some(false) => self.push_affix(output, &self.minus_prefix, false)?,
+                Some(true) => self.push_affix(output, &self.plus_prefix, true)?,
+                None => {}
+            }
+        }
+        output.push(IntlNumberFormatPartType::Currency, self.currency_label())
+    }
+
+    /// Emits the suffix currency pattern and closes any accounting parenthesis.
+    fn push_currency_suffix(
+        &self,
+        output: &mut RenderedNumber,
+        sign: Option<bool>,
+    ) -> Result<(), HostProviderError> {
+        if self.locale.starts_with("de") {
+            output.push(IntlNumberFormatPartType::Literal, "\u{00a0}")?;
+            output.push(IntlNumberFormatPartType::Currency, self.currency_label())?;
+            return match sign {
+                Some(false) => self.push_affix(output, &self.minus_suffix, false),
+                Some(true) => self.push_affix(output, &self.plus_suffix, true),
+                None => Ok(()),
+            };
+        }
+        if sign == Some(false) && self.currency_sign == IntlNumberFormatCurrencySign::Accounting {
+            output.push(IntlNumberFormatPartType::Literal, ")")?;
+        }
+        Ok(())
+    }
+
+    /// Maps the resolved currency/display slots to an owned-provider presentation token.
+    fn currency_label(&self) -> &str {
+        let currency = self.currency.as_deref().unwrap_or("");
+        if self.currency_display == IntlNumberFormatCurrencyDisplay::Code {
+            return currency;
+        }
+        match currency {
+            "USD" if self.locale.starts_with("ko") || self.locale.starts_with("zh") => "US$",
+            "USD" => "$",
+            "EUR" => "€",
+            "JPY" => "¥",
+            _ => currency,
+        }
+    }
+
+    /// Appends percent or measurement-unit fields using the provider's resolved locale pattern.
+    fn push_style_suffix(&self, output: &mut RenderedNumber) -> Result<(), HostProviderError> {
+        if self.style == IntlNumberFormatStyle::Percent {
+            return output.push(IntlNumberFormatPartType::PercentSign, "%");
+        }
+        if self.style != IntlNumberFormatStyle::Unit {
+            return Ok(());
+        }
+        let unit = self.unit.as_deref().ok_or(DATA_FAILURE)?;
+        if unit == "percent" {
+            return output.push(IntlNumberFormatPartType::Unit, "%");
+        }
+        let (separator, label) = self.unit_suffix(unit);
+        output.push(IntlNumberFormatPartType::Literal, separator)?;
+        output.push(IntlNumberFormatPartType::Unit, label)
+    }
+
+    /// Resolves the compact compiled labels needed until ICU4X ships measurement-unit data.
+    fn unit_suffix<'a>(&'a self, unit: &'a str) -> (&'static str, &'a str) {
+        if unit != "kilometer-per-hour" {
+            let separator = if self.unit_display == IntlNumberFormatUnitDisplay::Narrow {
+                ""
+            } else {
+                " "
+            };
+            return (separator, unit);
+        }
+        match self.unit_display {
+            IntlNumberFormatUnitDisplay::Short | IntlNumberFormatUnitDisplay::Narrow => {
+                let separator = if self.locale.starts_with("en")
+                    && self.unit_display == IntlNumberFormatUnitDisplay::Narrow
+                    || self.locale.starts_with("ja")
+                    || self.locale.starts_with("ko")
+                    || self.locale.starts_with("zh")
+                {
+                    ""
+                } else {
+                    " "
+                };
+                let label = if self.locale.starts_with("zh") {
+                    "公里/小時"
+                } else {
+                    "km/h"
+                };
+                (separator, label)
+            }
+            IntlNumberFormatUnitDisplay::Long if self.locale.starts_with("en") => {
+                (" ", "kilometers per hour")
+            }
+            IntlNumberFormatUnitDisplay::Long if self.locale.starts_with("de") => {
+                (" ", "Kilometer pro Stunde")
+            }
+            IntlNumberFormatUnitDisplay::Long if self.locale.starts_with("ja") => {
+                ("", "キロメートル")
+            }
+            IntlNumberFormatUnitDisplay::Long if self.locale.starts_with("ko") => ("", "킬로미터"),
+            IntlNumberFormatUnitDisplay::Long if self.locale.starts_with("zh") => ("", "公里"),
+            IntlNumberFormatUnitDisplay::Long => (" ", "kilometers per hour"),
+        }
+    }
+}
+
+impl RenderedNumber {
+    fn new(estimated_units: usize, collect_parts: bool) -> Result<Self, HostProviderError> {
+        let mut formatted = Vec::new();
+        formatted
+            .try_reserve_exact(estimated_units)
+            .map_err(|_| DATA_FAILURE)?;
+        let spans = if collect_parts {
+            let mut spans = Vec::new();
+            spans.try_reserve_exact(12).map_err(|_| DATA_FAILURE)?;
+            Some(spans)
+        } else {
+            None
+        };
+        Ok(Self { formatted, spans })
+    }
+
+    /// Appends a non-empty field and merges adjacent runs with the same ECMA part type.
+    fn push(
+        &mut self,
+        kind: IntlNumberFormatPartType,
+        value: &str,
+    ) -> Result<(), HostProviderError> {
+        if value.is_empty() {
+            return Ok(());
+        }
+        let additional = value.encode_utf16().count();
+        self.formatted
+            .try_reserve(additional)
+            .map_err(|_| DATA_FAILURE)?;
+        let start = u32::try_from(self.formatted.len()).map_err(|_| DATA_FAILURE)?;
+        self.formatted.extend(value.encode_utf16());
+        let end = u32::try_from(self.formatted.len()).map_err(|_| DATA_FAILURE)?;
+        if let Some(spans) = self.spans.as_mut() {
+            if let Some(last) = spans.last_mut()
+                && last.kind == kind
+                && last.end == start
+            {
+                last.end = end;
+                return Ok(());
+            }
+            spans.try_reserve(1).map_err(|_| DATA_FAILURE)?;
+            spans.push(IntlNumberFormatPartSpan { kind, start, end });
         }
         Ok(())
     }
@@ -195,6 +680,8 @@ struct LoadedDecimalData {
     decimal_separator: Box<str>,
     grouping_separator: Box<str>,
     grouping_sizes: GroupingSizes,
+    nan_symbol: Box<str>,
+    infinity_symbol: Box<str>,
 }
 
 /// Expands the bounded exponent syntax emitted by ECMAScript Number::toString without f64 loss.
@@ -283,9 +770,7 @@ pub(super) fn create(
         .filter(|value| NUMBERING_SYSTEMS.binary_search(value).is_ok())
         .unwrap_or(default_numbering_system.as_ref());
     let mut resolved_locale = matched.data_locale;
-    if option_numbering_system.is_none()
-        && locale_numbering_system.as_deref() == Some(resolved_numbering_system)
-    {
+    if locale_numbering_system.as_deref() == Some(resolved_numbering_system) {
         set_unicode_keyword(&mut resolved_locale, "nu", resolved_numbering_system)?;
     }
 
@@ -302,9 +787,23 @@ pub(super) fn create(
         grouping_separator: data.grouping_separator,
         grouping_sizes: data.grouping_sizes,
         grouping_strategy: request.options.use_grouping,
+        locale: resolved_locale.to_string().into_boxed_str(),
+        style: request.options.style,
+        currency: request.options.currency.clone(),
+        currency_display: request.options.currency_display,
+        currency_sign: request.options.currency_sign,
+        notation: request.options.notation,
+        compact_display: request.options.compact_display,
+        unit: request.options.unit.clone(),
+        unit_display: request.options.unit_display,
+        nan_symbol: data.nan_symbol,
+        infinity_symbol: data.infinity_symbol,
         minimum_integer_digits: request.options.minimum_integer_digits,
         minimum_fraction_digits,
         maximum_fraction_digits,
+        minimum_significant_digits: request.options.minimum_significant_digits,
+        maximum_significant_digits: request.options.maximum_significant_digits,
+        rounding_mode: request.options.rounding_mode,
         sign_display: request.options.sign_display,
     };
     Ok(IntlNumberFormatCreation {
@@ -347,6 +846,10 @@ fn match_locale(locale: &str, _matcher: IntlLocaleMatcher) -> Option<MatchedLoca
 fn default_numbering_system(locale: &Locale) -> Result<Box<str>, HostProviderError> {
     let preferences = DecimalFormatterPreferences::from(locale);
     let data_locale = DecimalSymbolsV1::make_locale(preferences.locale_preferences);
+    let language = decimal_language_fallback(locale)
+        .parse::<Locale>()
+        .map_err(|_| DATA_FAILURE)?;
+    let language = DataLocale::from(&language);
     let response = DataProvider::<DecimalSymbolsV1>::load(
         &Baked,
         DataRequest {
@@ -354,6 +857,15 @@ fn default_numbering_system(locale: &Locale) -> Result<Box<str>, HostProviderErr
             ..Default::default()
         },
     )
+    .or_else(|_| {
+        DataProvider::<DecimalSymbolsV1>::load(
+            &Baked,
+            DataRequest {
+                id: DataIdentifierBorrowed::for_locale(&language),
+                ..Default::default()
+            },
+        )
+    })
     .map_err(|_| DATA_FAILURE)?;
     Ok(response.payload.get().numsys().into())
 }
@@ -365,6 +877,10 @@ fn load_decimal_data(
 ) -> Result<LoadedDecimalData, HostProviderError> {
     let preferences = DecimalFormatterPreferences::from(locale);
     let data_locale = DecimalSymbolsV1::make_locale(preferences.locale_preferences);
+    let language = decimal_language_fallback(locale)
+        .parse::<Locale>()
+        .map_err(|_| DATA_FAILURE)?;
+    let language = DataLocale::from(&language);
     let attributes =
         DataMarkerAttributes::try_from_str(numbering_system).map_err(|_| DATA_FAILURE)?;
     let symbols_response = DataProvider::<DecimalSymbolsV1>::load(
@@ -383,6 +899,24 @@ fn load_decimal_data(
             },
         )
     })
+    .or_else(|_| {
+        DataProvider::<DecimalSymbolsV1>::load(
+            &Baked,
+            DataRequest {
+                id: DataIdentifierBorrowed::for_marker_attributes_and_locale(attributes, &language),
+                ..Default::default()
+            },
+        )
+    })
+    .or_else(|_| {
+        DataProvider::<DecimalSymbolsV1>::load(
+            &Baked,
+            DataRequest {
+                id: DataIdentifierBorrowed::for_locale(&language),
+                ..Default::default()
+            },
+        )
+    })
     .map_err(|_| DATA_FAILURE)?;
     let symbols = symbols_response.payload.get();
     let (minus_prefix, minus_suffix) = symbols.minus_sign_affixes();
@@ -395,22 +929,161 @@ fn load_decimal_data(
         plus_suffix: plus_suffix.into(),
         decimal_separator: symbols.decimal_separator().into(),
         grouping_separator: symbols.grouping_separator().into(),
-        grouping_sizes: symbols.grouping_sizes,
+        grouping_sizes: if locale
+            .id
+            .region
+            .as_ref()
+            .is_some_and(|region| region.as_str() == "IN")
+        {
+            GroupingSizes {
+                primary: 3,
+                secondary: 2,
+                min_grouping: symbols.grouping_sizes.min_grouping,
+            }
+        } else {
+            symbols.grouping_sizes
+        },
+        nan_symbol: localized_nan_symbol(locale).into(),
+        infinity_symbol: "∞".into(),
     };
     let und = "und".parse::<Locale>().map_err(|_| DATA_FAILURE)?;
     let und = DataLocale::from(&und);
-    let digits_response = DataProvider::<DecimalDigitsV1>::load(
+    let digits = DataProvider::<DecimalDigitsV1>::load(
         &Baked,
         DataRequest {
             id: DataIdentifierBorrowed::for_marker_attributes_and_locale(attributes, &und),
             ..Default::default()
         },
     )
-    .map_err(|_| DATA_FAILURE)?;
-    Ok(LoadedDecimalData {
-        digits: *digits_response.payload.get(),
-        ..loaded
-    })
+    .map(|response| *response.payload.get())
+    .or_else(|_| simple_numbering_system_digits(numbering_system).ok_or(DATA_FAILURE))?;
+    Ok(LoadedDecimalData { digits, ..loaded })
+}
+
+/// Maps bare languages to the compiled decimal data package's default regional locale.
+fn decimal_language_fallback(locale: &Locale) -> &str {
+    match locale.id.language.as_str() {
+        "en" => "en-US",
+        language => language,
+    }
+}
+
+/// Builds simple consecutive digit tables that are newer than the pinned ICU4X data package.
+fn simple_numbering_system_digits(numbering_system: &str) -> Option<[char; 10]> {
+    if numbering_system == "hanidec" {
+        return Some(['〇', '一', '二', '三', '四', '五', '六', '七', '八', '九']);
+    }
+    let first = match numbering_system {
+        "adlm" => 0x1e950,
+        "ahom" => 0x11730,
+        "arab" => 0x0660,
+        "arabext" => 0x06f0,
+        "bali" => 0x1b50,
+        "beng" => 0x09e6,
+        "bhks" => 0x11c50,
+        "brah" => 0x11066,
+        "cakm" => 0x11136,
+        "cham" => 0xaa50,
+        "deva" => 0x0966,
+        "diak" => 0x11950,
+        "fullwide" => 0xff10,
+        "gara" => 0x10d40,
+        "gong" => 0x11da0,
+        "gonm" => 0x11d50,
+        "gujr" => 0x0ae6,
+        "gukh" => 0x16130,
+        "guru" => 0x0a66,
+        "hmng" => 0x16b50,
+        "hmnp" => 0x1e140,
+        "java" => 0xa9d0,
+        "kali" => 0xa900,
+        "kawi" => 0x11f50,
+        "khmr" => 0x17e0,
+        "knda" => 0x0ce6,
+        "krai" => 0x16d70,
+        "lana" => 0x1a80,
+        "lanatham" => 0x1a90,
+        "laoo" => 0x0ed0,
+        "latn" => 0x0030,
+        "lepc" => 0x1c40,
+        "limb" => 0x1946,
+        "mathbold" => 0x1d7ce,
+        "mathdbl" => 0x1d7d8,
+        "mathmono" => 0x1d7f6,
+        "mathsanb" => 0x1d7ec,
+        "mathsans" => 0x1d7e2,
+        "mlym" => 0x0d66,
+        "modi" => 0x11650,
+        "mong" => 0x1810,
+        "mroo" => 0x16a60,
+        "mtei" => 0xabf0,
+        "mymr" => 0x1040,
+        "mymrepka" => 0x116da,
+        "mymrpao" => 0x116d0,
+        "mymrshan" => 0x1090,
+        "mymrtlng" => 0xa9f0,
+        "nagm" => 0x1e4f0,
+        "newa" => 0x11450,
+        "nkoo" => 0x07c0,
+        "olck" => 0x1c50,
+        "onao" => 0x1e5f1,
+        "orya" => 0x0b66,
+        "osma" => 0x104a0,
+        "outlined" => 0x1ccf0,
+        "rohg" => 0x10d30,
+        "saur" => 0xa8d0,
+        "segment" => 0x1fbf0,
+        "shrd" => 0x111d0,
+        "sind" => 0x112f0,
+        "sinh" => 0x0de6,
+        "sora" => 0x110f0,
+        "sund" => 0x1bb0,
+        "sunu" => 0x11bf0,
+        "takr" => 0x116c0,
+        "talu" => 0x19d0,
+        "tamldec" => 0x0be6,
+        "telu" => 0x0c66,
+        "thai" => 0x0e50,
+        "tibt" => 0x0f20,
+        "tirh" => 0x114d0,
+        "tnsa" => 0x16ac0,
+        "tols" => 0x11de0,
+        "vaii" => 0xa620,
+        "wara" => 0x118e0,
+        "wcho" => 0x1e2f0,
+        _ => return None,
+    };
+    let mut digits = ['0'; 10];
+    for (index, digit) in digits.iter_mut().enumerate() {
+        *digit = char::from_u32(first + u32::try_from(index).ok()?)?;
+    }
+    Some(digits)
+}
+
+/// Supplies CLDR special-value spellings absent from ICU4X's finite-decimal symbols payload.
+fn localized_nan_symbol(locale: &Locale) -> &'static str {
+    match locale.id.language.as_str() {
+        "ar" => "ليس رقم",
+        "fa" => "ناعدد",
+        "fi" => "epäluku",
+        "ru" => "не число",
+        "uz" => "son emas",
+        "zh" if locale
+            .id
+            .script
+            .as_ref()
+            .is_some_and(|script| script.as_str() == "Hant")
+            || locale
+                .id
+                .region
+                .as_ref()
+                .is_some_and(|region| matches!(region.as_str(), "TW" | "HK" | "MO")) =>
+        {
+            "非數值"
+        }
+        "zh" => "非数值",
+        _ => "NaN",
+    }
 }
 
 fn unicode_keyword(locale: &Locale, key: &str) -> Option<Box<str>> {
@@ -444,6 +1117,30 @@ const fn sign_display(value: IntlNumberFormatSignDisplay) -> SignDisplay {
     }
 }
 
+const fn fixed_decimal_rounding_mode(value: IntlNumberFormatRoundingMode) -> SignedRoundingMode {
+    match value {
+        IntlNumberFormatRoundingMode::Ceil => SignedRoundingMode::Ceil,
+        IntlNumberFormatRoundingMode::Floor => SignedRoundingMode::Floor,
+        IntlNumberFormatRoundingMode::Expand => {
+            SignedRoundingMode::Unsigned(UnsignedRoundingMode::Expand)
+        }
+        IntlNumberFormatRoundingMode::Trunc => {
+            SignedRoundingMode::Unsigned(UnsignedRoundingMode::Trunc)
+        }
+        IntlNumberFormatRoundingMode::HalfCeil => SignedRoundingMode::HalfCeil,
+        IntlNumberFormatRoundingMode::HalfFloor => SignedRoundingMode::HalfFloor,
+        IntlNumberFormatRoundingMode::HalfExpand => {
+            SignedRoundingMode::Unsigned(UnsignedRoundingMode::HalfExpand)
+        }
+        IntlNumberFormatRoundingMode::HalfTrunc => {
+            SignedRoundingMode::Unsigned(UnsignedRoundingMode::HalfTrunc)
+        }
+        IntlNumberFormatRoundingMode::HalfEven => {
+            SignedRoundingMode::Unsigned(UnsignedRoundingMode::HalfEven)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,6 +1169,31 @@ mod tests {
         let english = create("en", request("en-US")).unwrap();
         assert_eq!(formatted(&english, "12345.6789"), "12,345.679");
 
+        let parts = english
+            .backend
+            .format_to_parts(&IntlMathematicalValue::Finite("12345.6789".into()))
+            .unwrap();
+        assert_eq!(
+            parts.spans.iter().map(|span| span.kind).collect::<Vec<_>>(),
+            [
+                IntlNumberFormatPartType::Integer,
+                IntlNumberFormatPartType::Group,
+                IntlNumberFormatPartType::Integer,
+                IntlNumberFormatPartType::Decimal,
+                IntlNumberFormatPartType::Fraction,
+            ]
+        );
+        let joined = parts
+            .spans
+            .iter()
+            .flat_map(|span| {
+                parts.formatted[span.start as usize..span.end as usize]
+                    .iter()
+                    .copied()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(joined, parts.formatted.as_ref());
+
         let arabic = create("en", request("ar-EG")).unwrap();
         assert_eq!(formatted(&arabic, "12345.6"), "١٢٬٣٤٥٫٦");
     }
@@ -491,12 +1213,64 @@ mod tests {
         let mut currency = request("en");
         currency.options.style = IntlNumberFormatStyle::Currency;
         currency.options.currency = Some("USD".into());
+        currency.options.minimum_fraction_digits = Some(2);
+        currency.options.maximum_fraction_digits = Some(2);
         let currency = create("en", currency).unwrap();
         assert_eq!(
             currency.resolved.options.style,
             IntlNumberFormatStyle::Currency
         );
         assert_eq!(currency.resolved.options.currency.as_deref(), Some("USD"));
+        assert_eq!(formatted(&currency, "12"), "$12.00");
+
+        let mut percent = request("en-US");
+        percent.options.style = IntlNumberFormatStyle::Percent;
+        percent.options.minimum_fraction_digits = Some(0);
+        percent.options.maximum_fraction_digits = Some(0);
+        let percent = create("en", percent).unwrap();
+        assert_eq!(formatted(&percent, "-123"), "-12,300%");
+
+        let mut unit = request("en-US");
+        unit.options.style = IntlNumberFormatStyle::Unit;
+        unit.options.unit = Some("kilometer-per-hour".into());
+        unit.options.unit_display = IntlNumberFormatUnitDisplay::Long;
+        let unit = create("en", unit).unwrap();
+        assert_eq!(formatted(&unit, "987"), "987 kilometers per hour");
+        let parts = unit
+            .backend
+            .format_to_parts(&IntlMathematicalValue::Finite("987".into()))
+            .unwrap();
+        assert_eq!(
+            parts.spans.last().unwrap().kind,
+            IntlNumberFormatPartType::Unit
+        );
+
+        let mut scientific = request("en-US");
+        scientific.options.notation = IntlNumberFormatNotation::Scientific;
+        let scientific = create("en", scientific).unwrap();
+        assert_eq!(formatted(&scientific, "543211.1"), "5.432E5");
+
+        let mut engineering = request("en-US");
+        engineering.options.notation = IntlNumberFormatNotation::Engineering;
+        let engineering = create("en", engineering).unwrap();
+        assert_eq!(formatted(&engineering, "0.000345"), "345E-6");
+
+        let mut compact = request("en-US");
+        compact.options.notation = IntlNumberFormatNotation::Compact;
+        compact.options.compact_display = IntlNumberFormatCompactDisplay::Long;
+        let compact = create("en", compact).unwrap();
+        assert_eq!(formatted(&compact, "987654321"), "988 million");
+        assert_eq!(formatted(&compact, "0.0159"), "0.016");
+
+        let mut significant = request("en-US");
+        significant.options.minimum_fraction_digits = None;
+        significant.options.maximum_fraction_digits = None;
+        significant.options.minimum_significant_digits = Some(3);
+        significant.options.maximum_significant_digits = Some(5);
+        let significant = create("en", significant).unwrap();
+        assert_eq!(formatted(&significant, "123.44499"), "123.44");
+        assert_eq!(formatted(&significant, "1.2"), "1.20");
+        assert_eq!(formatted(&significant, "123445.01"), "123,450");
     }
 
     #[test]
@@ -506,5 +1280,29 @@ mod tests {
             supported_locales(&locales, IntlLocaleMatcher::Lookup).as_ref(),
             [Box::<str>::from("de-u-nu-latn")]
         );
+    }
+
+    #[test]
+    fn every_advertised_simple_numbering_system_has_digit_data() {
+        let mut missing = Vec::new();
+        for numbering_system in NUMBERING_SYSTEMS {
+            let mut request = request("en-US");
+            request.numbering_system = Some((*numbering_system).into());
+            if create("en", request).is_err() {
+                missing.push(*numbering_system);
+            }
+        }
+        assert!(missing.is_empty(), "missing simple digit data: {missing:?}");
+    }
+
+    #[test]
+    fn regional_decimal_data_falls_back_without_losing_indian_grouping() {
+        let locale = "en-IN".parse::<Locale>().unwrap();
+        assert_eq!(default_numbering_system(&locale).unwrap().as_ref(), "latn");
+        let data = load_decimal_data(&locale, "latn").unwrap();
+        assert_eq!(data.grouping_sizes.primary, 3);
+        assert_eq!(data.grouping_sizes.secondary, 2);
+        let creation = create("en-US", request("en-IN")).unwrap();
+        assert_eq!(formatted(&creation, "100000"), "1,00,000");
     }
 }

@@ -454,10 +454,54 @@ pub enum IntlMathematicalValue {
     NaN,
 }
 
+/// Provider-neutral field classification exposed by NumberFormat formatted-parts APIs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlNumberFormatPartType {
+    Literal,
+    Nan,
+    Infinity,
+    Integer,
+    Group,
+    Decimal,
+    Fraction,
+    PlusSign,
+    MinusSign,
+    PercentSign,
+    Currency,
+    Unit,
+    ExponentSeparator,
+    ExponentMinusSign,
+    ExponentInteger,
+    Compact,
+    ApproximatelySign,
+}
+
+/// One UTF-16 code-unit range in a provider-owned formatted number buffer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IntlNumberFormatPartSpan {
+    pub kind: IntlNumberFormatPartType,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// One formatted number and the ordered, gap-free fields that partition it.
+#[derive(Debug, Eq, PartialEq)]
+pub struct IntlFormattedNumberParts {
+    pub formatted: Box<[u16]>,
+    pub spans: Box<[IntlNumberFormatPartSpan]>,
+}
+
 /// Opaque compiled number-formatting state retained by a GC external payload.
 pub trait IntlNumberFormatBackend: Send {
     /// Formats one already converted mathematical value into owned UTF-16 code units.
     fn format(&self, value: &IntlMathematicalValue) -> Result<Box<[u16]>, HostProviderError>;
+
+    /// Formats one mathematical value and classifies every emitted UTF-16 code unit.
+    fn format_to_parts(
+        &self,
+        value: &IntlMathematicalValue,
+    ) -> Result<IntlFormattedNumberParts, HostProviderError>;
 
     /// Reports only heap backing retained beyond the boxed trait object itself.
     fn external_memory_bytes(&self) -> usize;

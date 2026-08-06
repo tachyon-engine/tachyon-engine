@@ -2656,6 +2656,9 @@ impl Isolate {
             }
             NativeContinuationKind::IntlCollator(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::IntlNumberFormat(_) => (continuation.second(), 0, None, 0),
+            NativeContinuationKind::IntlNumberFormatLegacy(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::TypedArrayCallback(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -6510,8 +6513,7 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::NumberToLocaleString) => {
                     let receiver = self.this_number_value(site.this_value)?;
-                    let value = self.number_to_string(receiver, None)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.start_number_to_locale_string(&site, receiver);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpConstructor) => {
                     let regexp = self.create_regexp_from_site(&site)?;
@@ -7994,6 +7996,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::IntlNumberFormatFormat) => {
                     return self.begin_intl_number_format_format(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::IntlNumberFormatFormatToParts) => {
+                    return self.begin_intl_number_format_format_to_parts(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::IntlNumberFormatResolvedOptions) => {
                     return self.call_intl_number_format_resolved_options(&site);
                 }
@@ -8892,6 +8897,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::IntlNumberFormat(stage) => {
                     self.resume_intl_number_format(continuation, stage, value)
+                }
+                NativeContinuationKind::IntlNumberFormatLegacy(stage) => {
+                    self.resume_intl_number_format_legacy(continuation, stage, value)
                 }
                 NativeContinuationKind::TypedArrayCallback(stage) => {
                     let state = self.native_call_state_reference(continuation.first())?;

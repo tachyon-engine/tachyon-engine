@@ -365,11 +365,16 @@ pub(super) fn normalize_fraction_digits(
     Ok((Some(minimum), Some(maximum)))
 }
 
-pub(super) fn fraction_defaults(style: IntlNumberFormatStyle) -> (u8, u8) {
-    match style {
-        IntlNumberFormatStyle::Percent => (0, 0),
-        IntlNumberFormatStyle::Currency => (2, 2),
-        IntlNumberFormatStyle::Decimal | IntlNumberFormatStyle::Unit => (0, 3),
+pub(super) fn fraction_defaults(
+    style: IntlNumberFormatStyle,
+    notation: IntlNumberFormatNotation,
+) -> (u8, u8) {
+    match (style, notation) {
+        (IntlNumberFormatStyle::Percent, _) => (0, 0),
+        (IntlNumberFormatStyle::Currency, IntlNumberFormatNotation::Standard) => (2, 2),
+        (IntlNumberFormatStyle::Currency, _)
+        | (IntlNumberFormatStyle::Decimal, _)
+        | (IntlNumberFormatStyle::Unit, _) => (0, 3),
     }
 }
 

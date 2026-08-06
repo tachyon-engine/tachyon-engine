@@ -19,14 +19,43 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let locales = self.call_argument(site, 0)?.unwrap_or(UNDEFINED);
         let options = self.call_argument(site, 1)?.unwrap_or(UNDEFINED);
-        let new_target = if self.is_object_value(site.new_target) {
-            site.new_target
-        } else {
+        let called_without_new = !self.is_object_value(site.new_target);
+        let new_target = if called_without_new {
             site.callee
+        } else {
+            site.new_target
         };
-        let state = self.allocate_pending_intl_number_format(PendingIntlNumberFormat::new(
-            new_target, options, false,
-        ))?;
+        let mut pending = PendingIntlNumberFormat::new(new_target, options, false);
+        if called_without_new {
+            pending.legacy_receiver = site.this_value;
+        }
+        let state = self.allocate_pending_intl_number_format(pending)?;
+        self.dispatch_intl_number_format_nested(
+            NativeContinuation::intl_number_format(
+                native_site(site),
+                IntlNumberFormatStage::Locales,
+                Value::from_heap_ref(state.raw()),
+                locales,
+            ),
+            |isolate| isolate.begin_intl_get_canonical_locales(site),
+        )
+    }
+
+    /// Runs NumberFormat construction for `Number.prototype.toLocaleString` without JS re-entry.
+    pub(crate) fn start_number_to_locale_string(
+        &mut self,
+        site: &CallSite,
+        number: Value,
+    ) -> Result<(), ExecutionError> {
+        let locales = self.call_argument(site, 0)?.unwrap_or(UNDEFINED);
+        let options = self.call_argument(site, 1)?.unwrap_or(UNDEFINED);
+        let constructor = self
+            .realm
+            .intl_number_format_constructor
+            .expect("Intl.NumberFormat initializes before Number.prototype.toLocaleString");
+        let mut pending = PendingIntlNumberFormat::new(constructor, options, false);
+        pending.format_value = number;
+        let state = self.allocate_pending_intl_number_format(pending)?;
         self.dispatch_intl_number_format_nested(
             NativeContinuation::intl_number_format(
                 native_site(site),
@@ -507,7 +536,7 @@ impl Isolate {
         state: GcRef<PendingIntlNumberFormat>,
     ) -> Result<(), ExecutionError> {
         let snapshot = self.pending_intl_number_format_snapshot(state)?;
-        let (mnfd_default, mut mxfd_default) = fraction_defaults(snapshot.style);
+        let (mnfd_default, mut mxfd_default) = fraction_defaults(snapshot.style, snapshot.notation);
         if snapshot.rounding_increment != 1 {
             mxfd_default = mnfd_default;
         }
@@ -662,7 +691,20 @@ impl Isolate {
             .unwrap_or(default_prototype);
         let number_format =
             self.allocate_intl_number_format_object(creation, prototype, AllocationSpace::Young)?;
-        self.write(site.caller_base, site.destination, number_format)
+        if snapshot.format_value.as_immediate() != Some(Immediate::Undefined) {
+            self.write(site.caller_base, site.destination, number_format)?;
+            return self.finish_intl_number_format_value_to_string(
+                site,
+                number_format,
+                snapshot.format_value,
+            );
+        }
+        if snapshot.legacy_receiver.as_immediate() == Some(Immediate::Undefined)
+            || !self.is_object_value(snapshot.legacy_receiver)
+        {
+            return self.write(site.caller_base, site.destination, number_format);
+        }
+        self.begin_intl_number_format_chain(site, snapshot.legacy_receiver, number_format)
     }
 
     /// Filters canonical locales and materializes a fresh intrinsic Array without observable push.

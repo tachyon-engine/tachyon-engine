@@ -786,6 +786,7 @@ pub(crate) enum NativeFunction {
     IntlNumberFormatConstructor,
     IntlNumberFormatFormatGetter,
     IntlNumberFormatFormat,
+    IntlNumberFormatFormatToParts,
     IntlNumberFormatResolvedOptions,
     IntlNumberFormatSupportedLocalesOf,
     JsonParse,
@@ -1600,7 +1601,9 @@ impl NativeFunction {
             | Self::IntlNumberFormatFormatGetter
             | Self::IntlNumberFormatResolvedOptions
             | Self::IntlNumberFormatConstructor => 0,
-            Self::IntlCollatorCompare | Self::IntlNumberFormatFormat => 1,
+            Self::IntlCollatorCompare
+            | Self::IntlNumberFormatFormat
+            | Self::IntlNumberFormatFormatToParts => 1,
             Self::JsonParse => 2,
             Self::JsonStringify => 3,
             Self::HostCreateRealm => 0,
@@ -2031,6 +2034,7 @@ impl NativeFunction {
             Self::IntlNumberFormatConstructor => "NumberFormat",
             Self::IntlNumberFormatFormatGetter => "get format",
             Self::IntlNumberFormatFormat => "",
+            Self::IntlNumberFormatFormatToParts => "formatToParts",
             Self::IntlNumberFormatResolvedOptions => "resolvedOptions",
             Self::IntlNumberFormatSupportedLocalesOf => "supportedLocalesOf",
             Self::JsonParse => "parse",

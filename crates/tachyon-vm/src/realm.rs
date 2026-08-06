@@ -4000,6 +4000,12 @@ impl Isolate {
             prototype: object_prototype,
         })?;
         self.realm.intl_object = Some(object);
+        let fallback_description = self.allocate_runtime_string(
+            JsString::try_from_latin1(b"IntlLegacyConstructedSymbol")
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        let fallback_symbol = self.allocate_symbol(Some(fallback_description))?;
+        self.realm.intl_legacy_constructed_symbol = Some(fallback_symbol);
         let locale_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
             shape: ShapeId::EMPTY,
             extensible: true,
@@ -4195,6 +4201,22 @@ impl Isolate {
             },
         )?;
         self.realm.intl_number_format_format = Some(format);
+        let format_to_parts = self.allocate_native_function(
+            NativeFunction::IntlNumberFormatFormatToParts,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let format_to_parts_atom = self.intern_intrinsic_name(b"formatToParts")?;
+        self.set_intrinsic_data_property(
+            number_format_prototype,
+            format_to_parts_atom,
+            format_to_parts,
+            true,
+        )?;
         let number_resolved_options = self.allocate_native_function(
             NativeFunction::IntlNumberFormatResolvedOptions,
             OrdinaryObject {

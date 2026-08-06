@@ -7,6 +7,12 @@ struct IntlNumberFormatValueRoots<'a> {
     state: NativeCallState,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlNumberFormatOutput {
+    String,
+    Parts,
+}
+
 impl Trace for IntlNumberFormatValueRoots<'_> {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
@@ -66,7 +72,27 @@ impl Isolate {
         &mut self,
         site: &CallSite,
     ) -> Result<(), ExecutionError> {
-        let number_format = self.intl_number_format_reference(site.this_value)?;
+        if self
+            .intl_number_format_reference_if_branded(site.this_value)
+            .is_some()
+        {
+            return self
+                .finish_intl_number_format_format_getter(Self::native_site(site), site.this_value);
+        }
+        self.begin_intl_number_format_unwrap(
+            Self::native_site(site),
+            IntlNumberFormatLegacyStage::FormatHasInstance,
+            site.this_value,
+        )
+    }
+
+    /// Returns or creates the cached bound formatter for an already unwrapped receiver.
+    fn finish_intl_number_format_format_getter(
+        &mut self,
+        site: NativeContinuationSite,
+        number_format_value: Value,
+    ) -> Result<(), ExecutionError> {
+        let number_format = self.intl_number_format_reference(number_format_value)?;
         let snapshot = self.intl_number_format_snapshot(number_format)?;
         if snapshot.cached_bound_format.as_immediate() != Some(Immediate::Undefined) {
             return self.write(
@@ -75,7 +101,7 @@ impl Isolate {
                 snapshot.cached_bound_format,
             );
         }
-        let format = self.allocate_intl_number_format_bound_format(site.this_value)?;
+        let format = self.allocate_intl_number_format_bound_format(number_format_value)?;
         self.set_intl_number_format_bound_format(number_format, format)?;
         self.write(site.caller_base, site.destination, format)
     }
@@ -85,6 +111,23 @@ impl Isolate {
         &mut self,
         site: &CallSite,
     ) -> Result<(), ExecutionError> {
+        self.begin_intl_number_format_value(site, IntlNumberFormatOutput::String)
+    }
+
+    /// Starts the same resumable ToIntlMathematicalValue path for structured output.
+    pub(crate) fn begin_intl_number_format_format_to_parts(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        self.begin_intl_number_format_value(site, IntlNumberFormatOutput::Parts)
+    }
+
+    /// Brands the receiver before any argument coercion and preserves the selected output mode.
+    fn begin_intl_number_format_value(
+        &mut self,
+        site: &CallSite,
+        output: IntlNumberFormatOutput,
+    ) -> Result<(), ExecutionError> {
         self.intl_number_format_reference(site.this_value)?;
         let value = self
             .call_argument(site, 0)?
@@ -93,7 +136,7 @@ impl Isolate {
             let state = self.allocate_intl_number_format_value_state(NativeCallState {
                 values: [
                     site.this_value,
-                    Value::from_immediate(Immediate::Undefined),
+                    boolean_value(output == IntlNumberFormatOutput::Parts),
                     Value::from_immediate(Immediate::Undefined),
                     Value::from_immediate(Immediate::Undefined),
                     Value::from_immediate(Immediate::Undefined),
@@ -117,6 +160,7 @@ impl Isolate {
             },
             site.this_value,
             value,
+            output,
         )
     }
 
@@ -127,8 +171,13 @@ impl Isolate {
         state: GcRef<NativeCallState>,
         primitive: Value,
     ) -> Result<(), ExecutionError> {
-        let number_format = self.native_call_state_snapshot(state)?.values[0];
-        self.finish_intl_number_format_format(site, number_format, primitive)
+        let snapshot = self.native_call_state_snapshot(state)?;
+        let output = if snapshot.values[1].as_immediate() == Some(Immediate::True) {
+            IntlNumberFormatOutput::Parts
+        } else {
+            IntlNumberFormatOutput::String
+        };
+        self.finish_intl_number_format_format(site, snapshot.values[0], primitive, output)
     }
 
     /// Formats one primitive value through the immutable provider backend.
@@ -137,25 +186,130 @@ impl Isolate {
         site: NativeContinuationSite,
         number_format: Value,
         value: Value,
+        output: IntlNumberFormatOutput,
     ) -> Result<(), ExecutionError> {
         let number_format = self.intl_number_format_reference(number_format)?;
         let input = self.intl_mathematical_value(value)?;
         let payload = self.intl_number_format_snapshot(number_format)?.payload;
-        let formatted = self.heap.with_running_scope(|scope| {
-            let payload = scope.root(payload).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(payload, self.types.intl_number_format_payload)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .backend
-                    .format(&input)
-                    .map_err(ExecutionError::IntlProvider)
-            })
-        })?;
-        let result = self.allocate_runtime_string(
-            JsString::try_from_utf16(&formatted).map_err(ExecutionError::PropertyKeyString)?,
+        match output {
+            IntlNumberFormatOutput::String => {
+                let formatted = self.heap.with_running_scope(|scope| {
+                    let payload = scope.root(payload).map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        no_gc
+                            .borrow(payload, self.types.intl_number_format_payload)
+                            .map_err(ExecutionError::NoGcBorrow)?
+                            .backend
+                            .format(&input)
+                            .map_err(ExecutionError::IntlProvider)
+                    })
+                })?;
+                let result = self.allocate_runtime_string(
+                    JsString::try_from_utf16(&formatted)
+                        .map_err(ExecutionError::PropertyKeyString)?,
+                )?;
+                self.write(site.caller_base, site.destination, result)
+            }
+            IntlNumberFormatOutput::Parts => {
+                let parts = self.heap.with_running_scope(|scope| {
+                    let payload = scope.root(payload).map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        no_gc
+                            .borrow(payload, self.types.intl_number_format_payload)
+                            .map_err(ExecutionError::NoGcBorrow)?
+                            .backend
+                            .format_to_parts(&input)
+                            .map_err(ExecutionError::IntlProvider)
+                    })
+                })?;
+                self.materialize_intl_number_format_parts(site, parts)
+            }
+        }
+    }
+
+    /// Formats the already extracted Number receiver after toLocaleString option processing.
+    pub(crate) fn finish_intl_number_format_value_to_string(
+        &mut self,
+        site: NativeContinuationSite,
+        number_format: Value,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        self.finish_intl_number_format_format(
+            site,
+            number_format,
+            value,
+            IntlNumberFormatOutput::String,
+        )
+    }
+
+    /// Creates the intrinsic Array and fresh `{ type, value }` records without observable push.
+    fn materialize_intl_number_format_parts(
+        &mut self,
+        site: NativeContinuationSite,
+        parts: IntlFormattedNumberParts,
+    ) -> Result<(), ExecutionError> {
+        self.validate_intl_number_format_parts(&parts)?;
+        let result = self.create_array_object_with_prototype(
+            self.realm
+                .array_prototype
+                .expect("Array prototype initializes before Intl.NumberFormat"),
         )?;
-        self.write(site.caller_base, site.destination, result)
+        self.write(site.caller_base, site.destination, result)?;
+        let type_key = self.intern_intrinsic_name(b"type")?;
+        let value_key = self.intern_intrinsic_name(b"value")?;
+        for (index, span) in parts.spans.iter().copied().enumerate() {
+            let result = self.read(site.caller_base, site.destination)?;
+            let part = self.create_ordinary_object()?;
+            let index = u32::try_from(index).map_err(|_| ExecutionError::ArrayLengthOverflow)?;
+            let property = self.property_key_atom(safe_integer_value(u64::from(index)))?;
+            self.set_own_data_property(result, property, part)?;
+
+            let (part_type, part) = self.allocate_runtime_string_retaining(
+                JsString::try_from_latin1(intl_number_format_part_name(span.kind))
+                    .map_err(ExecutionError::PropertyKeyString)?,
+                part,
+            )?;
+            self.set_own_data_property(part, type_key, part_type)?;
+
+            let result = self.read(site.caller_base, site.destination)?;
+            let part = self
+                .get_data_property(result, property)?
+                .ok_or(ExecutionError::MissingNativeContinuation)?;
+            let start = usize::try_from(span.start)
+                .map_err(|_| ExecutionError::NumberFormatInvalidDigit)?;
+            let end =
+                usize::try_from(span.end).map_err(|_| ExecutionError::NumberFormatInvalidDigit)?;
+            let units = parts
+                .formatted
+                .get(start..end)
+                .ok_or(ExecutionError::NumberFormatInvalidDigit)?;
+            let (part_value, part) = self.allocate_runtime_string_retaining(
+                JsString::try_from_utf16(units).map_err(ExecutionError::PropertyKeyString)?,
+                part,
+            )?;
+            self.set_own_data_property(part, value_key, part_value)?;
+        }
+        Ok(())
+    }
+
+    /// Rejects malformed provider data before any partially populated result becomes observable.
+    fn validate_intl_number_format_parts(
+        &self,
+        parts: &IntlFormattedNumberParts,
+    ) -> Result<(), ExecutionError> {
+        let mut cursor = 0_u32;
+        for span in &parts.spans {
+            if span.start != cursor || span.end <= span.start {
+                return Err(ExecutionError::IntlProvider(HostProviderError::Failure(3)));
+            }
+            cursor = span.end;
+        }
+        let length = u32::try_from(parts.formatted.len())
+            .map_err(|_| ExecutionError::IntlProvider(HostProviderError::Failure(3)))?;
+        if cursor != length || (length != 0 && parts.spans.is_empty()) {
+            return Err(ExecutionError::IntlProvider(HostProviderError::Failure(3)));
+        }
+        Ok(())
     }
 
     /// Allocates the fixed receiver state before a formatting argument can invoke JavaScript.
@@ -193,7 +347,29 @@ impl Isolate {
         &mut self,
         site: &CallSite,
     ) -> Result<(), ExecutionError> {
-        let number_format = self.intl_number_format_reference(site.this_value)?;
+        if self
+            .intl_number_format_reference_if_branded(site.this_value)
+            .is_some()
+        {
+            return self.finish_intl_number_format_resolved_options(
+                Self::native_site(site),
+                site.this_value,
+            );
+        }
+        self.begin_intl_number_format_unwrap(
+            Self::native_site(site),
+            IntlNumberFormatLegacyStage::ResolvedOptionsHasInstance,
+            site.this_value,
+        )
+    }
+
+    /// Materializes resolved options for an already unwrapped NumberFormat object.
+    fn finish_intl_number_format_resolved_options(
+        &mut self,
+        site: NativeContinuationSite,
+        number_format_value: Value,
+    ) -> Result<(), ExecutionError> {
+        let number_format = self.intl_number_format_reference(number_format_value)?;
         let resolved = self.intl_number_format_resolved(number_format)?;
         let result = self.create_ordinary_object()?;
         self.write(site.caller_base, site.destination, result)?;
@@ -326,6 +502,201 @@ impl Isolate {
         self.set_intl_number_format_string(result, b"trailingZeroDisplay", trailing)
     }
 
+    /// Applies the normative-optional ChainNumberFormat operation after initialization.
+    pub(crate) fn begin_intl_number_format_chain(
+        &mut self,
+        site: NativeContinuationSite,
+        receiver: Value,
+        number_format: Value,
+    ) -> Result<(), ExecutionError> {
+        let constructor = self
+            .realm
+            .intl_number_format_constructor
+            .expect("Intl.NumberFormat constructor initializes before legacy chaining");
+        self.dispatch_intl_number_format_legacy(
+            NativeContinuation::intl_number_format_legacy(
+                site,
+                IntlNumberFormatLegacyStage::ChainHasInstance,
+                receiver,
+                number_format,
+            ),
+            |isolate| isolate.begin_ordinary_has_instance(site, constructor, receiver),
+        )
+    }
+
+    /// Starts OrdinaryHasInstance for one of the two UnwrapNumberFormat consumers.
+    fn begin_intl_number_format_unwrap(
+        &mut self,
+        site: NativeContinuationSite,
+        stage: IntlNumberFormatLegacyStage,
+        receiver: Value,
+    ) -> Result<(), ExecutionError> {
+        if !self.is_object_value(receiver) {
+            return Err(ExecutionError::IncompatibleIntlNumberFormatReceiver(
+                receiver,
+            ));
+        }
+        let constructor = self
+            .realm
+            .intl_number_format_constructor
+            .expect("Intl.NumberFormat constructor initializes before unwrap");
+        self.dispatch_intl_number_format_legacy(
+            NativeContinuation::intl_number_format_legacy(
+                site,
+                stage,
+                receiver,
+                Value::from_immediate(Immediate::Undefined),
+            ),
+            |isolate| isolate.begin_ordinary_has_instance(site, constructor, receiver),
+        )
+    }
+
+    /// Resumes ChainNumberFormat or UnwrapNumberFormat after an observable nested operation.
+    pub(crate) fn resume_intl_number_format_legacy(
+        &mut self,
+        continuation: NativeContinuation,
+        stage: IntlNumberFormatLegacyStage,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let site = continuation.site();
+        let receiver = continuation.first();
+        match stage {
+            IntlNumberFormatLegacyStage::ChainHasInstance => {
+                let number_format = continuation.second();
+                if !self.is_truthy_value(value)? {
+                    return self.write(site.caller_base, site.destination, number_format);
+                }
+                self.define_intl_number_format_legacy_fallback(site, receiver, number_format)
+            }
+            IntlNumberFormatLegacyStage::ChainDefine => {
+                self.write(site.caller_base, site.destination, receiver)
+            }
+            IntlNumberFormatLegacyStage::FormatHasInstance
+            | IntlNumberFormatLegacyStage::ResolvedOptionsHasInstance => {
+                if !self.is_truthy_value(value)? {
+                    return Err(ExecutionError::IncompatibleIntlNumberFormatReceiver(
+                        receiver,
+                    ));
+                }
+                let get_stage = if stage == IntlNumberFormatLegacyStage::FormatHasInstance {
+                    IntlNumberFormatLegacyStage::FormatFallbackGet
+                } else {
+                    IntlNumberFormatLegacyStage::ResolvedOptionsFallbackGet
+                };
+                self.dispatch_intl_number_format_fallback_get(site, get_stage, receiver)
+            }
+            IntlNumberFormatLegacyStage::FormatFallbackGet => {
+                self.finish_intl_number_format_format_getter(site, value)
+            }
+            IntlNumberFormatLegacyStage::ResolvedOptionsFallbackGet => {
+                self.finish_intl_number_format_resolved_options(site, value)
+            }
+        }
+    }
+
+    /// Defines the hidden fallback edge through ordinary or Proxy [[DefineOwnProperty]].
+    fn define_intl_number_format_legacy_fallback(
+        &mut self,
+        site: NativeContinuationSite,
+        receiver: Value,
+        number_format: Value,
+    ) -> Result<(), ExecutionError> {
+        let key = self.intl_number_format_legacy_key()?;
+        let descriptor = PropertyDescriptor::Data(DataPropertyDescriptor {
+            value: Some(number_format),
+            writable: Some(false),
+            enumerable: Some(false),
+            configurable: Some(false),
+        });
+        if !self.is_proxy_value(receiver) {
+            self.define_property(receiver, key, descriptor)?;
+            return self.write(site.caller_base, site.destination, receiver);
+        }
+        self.dispatch_intl_number_format_legacy(
+            NativeContinuation::intl_number_format_legacy(
+                site,
+                IntlNumberFormatLegacyStage::ChainDefine,
+                receiver,
+                number_format,
+            ),
+            |isolate| {
+                isolate.dispatch_proxy_define(
+                    site,
+                    receiver,
+                    key,
+                    descriptor,
+                    ProxyDefineMode::Object,
+                )
+            },
+        )
+    }
+
+    /// Performs the observable fallback-symbol Get required by UnwrapNumberFormat.
+    fn dispatch_intl_number_format_fallback_get(
+        &mut self,
+        site: NativeContinuationSite,
+        stage: IntlNumberFormatLegacyStage,
+        receiver: Value,
+    ) -> Result<(), ExecutionError> {
+        let key = self.intl_number_format_legacy_key()?;
+        self.dispatch_intl_number_format_legacy(
+            NativeContinuation::intl_number_format_legacy(
+                site,
+                stage,
+                receiver,
+                Value::from_immediate(Immediate::Undefined),
+            ),
+            |isolate| isolate.dispatch_proxy_aware_property_read(site, receiver, receiver, key),
+        )
+    }
+
+    /// Drains a synchronous nested MOP or leaves the typed parent below a JavaScript frame.
+    fn dispatch_intl_number_format_legacy(
+        &mut self,
+        continuation: NativeContinuation,
+        operation: impl FnOnce(&mut Self) -> Result<Option<RunOutcome>, ExecutionError>,
+    ) -> Result<(), ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Self::completion_stack_error)?;
+        let frame_depth = self.fiber.frames.len();
+        let outcome = match operation(self) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if self.fiber.completions.len() > completion_depth {
+                    self.pop_native_continuation()?;
+                }
+                return Err(error);
+            }
+        };
+        if self.fiber.completions.len() == completion_depth
+            || self.fiber.frames.len() != frame_depth
+        {
+            return Ok(());
+        }
+        debug_assert!(outcome.is_none());
+        let continuation = self.pop_native_continuation()?;
+        let value = self.read(
+            continuation.site().caller_base,
+            continuation.site().destination,
+        )?;
+        let NativeContinuationKind::IntlNumberFormatLegacy(stage) = continuation.kind() else {
+            return Err(ExecutionError::MissingNativeContinuation);
+        };
+        self.resume_intl_number_format_legacy(continuation, stage, value)
+    }
+
+    /// Returns the per-Realm hidden fallback Symbol as a property key.
+    fn intl_number_format_legacy_key(&mut self) -> Result<PropertyKey, ExecutionError> {
+        let symbol = self
+            .realm
+            .intl_legacy_constructed_symbol
+            .expect("Intl fallback symbol initializes before NumberFormat use");
+        self.property_key(symbol)
+    }
+
     /// Converts supported primitive Number/BigInt inputs without retaining managed borrows.
     fn intl_mathematical_value(
         &mut self,
@@ -370,6 +741,17 @@ impl Isolate {
         self.heap
             .checked_reference(raw, self.types.intl_number_format_object)
             .map_err(|_| ExecutionError::IncompatibleIntlNumberFormatReceiver(value))
+    }
+
+    #[inline(always)]
+    fn intl_number_format_reference_if_branded(
+        &self,
+        value: Value,
+    ) -> Option<GcRef<IntlNumberFormatObject>> {
+        let raw = value.as_heap_ref()?;
+        self.heap
+            .checked_reference(raw, self.types.intl_number_format_object)
+            .ok()
     }
 
     fn intl_number_format_snapshot(
@@ -517,5 +899,28 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let key = self.intern_intrinsic_name(key)?;
         self.set_own_data_property(result, key, safe_integer_value(u64::from(value)))
+    }
+}
+
+#[inline(always)]
+const fn intl_number_format_part_name(kind: IntlNumberFormatPartType) -> &'static [u8] {
+    match kind {
+        IntlNumberFormatPartType::Literal => b"literal",
+        IntlNumberFormatPartType::Nan => b"nan",
+        IntlNumberFormatPartType::Infinity => b"infinity",
+        IntlNumberFormatPartType::Integer => b"integer",
+        IntlNumberFormatPartType::Group => b"group",
+        IntlNumberFormatPartType::Decimal => b"decimal",
+        IntlNumberFormatPartType::Fraction => b"fraction",
+        IntlNumberFormatPartType::PlusSign => b"plusSign",
+        IntlNumberFormatPartType::MinusSign => b"minusSign",
+        IntlNumberFormatPartType::PercentSign => b"percentSign",
+        IntlNumberFormatPartType::Currency => b"currency",
+        IntlNumberFormatPartType::Unit => b"unit",
+        IntlNumberFormatPartType::ExponentSeparator => b"exponentSeparator",
+        IntlNumberFormatPartType::ExponentMinusSign => b"exponentMinusSign",
+        IntlNumberFormatPartType::ExponentInteger => b"exponentInteger",
+        IntlNumberFormatPartType::Compact => b"compact",
+        IntlNumberFormatPartType::ApproximatelySign => b"approximatelySign",
     }
 }

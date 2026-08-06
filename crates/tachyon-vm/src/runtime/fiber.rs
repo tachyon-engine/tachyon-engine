@@ -1789,6 +1789,18 @@ pub(crate) enum IntlNumberFormatStage {
     SignDisplay,
 }
 
+/// Observable legacy-constructor and UnwrapNumberFormat boundaries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum IntlNumberFormatLegacyStage {
+    ChainHasInstance,
+    ChainDefine,
+    FormatHasInstance,
+    FormatFallbackGet,
+    ResolvedOptionsHasInstance,
+    ResolvedOptionsFallbackGet,
+}
+
 /// Observable boundaries in the Async-from-Sync iterator algorithms.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1916,6 +1928,7 @@ pub(crate) enum NativeContinuationKind {
     IntlLocaleList(IntlLocaleListStage),
     IntlCollator(IntlCollatorStage),
     IntlNumberFormat(IntlNumberFormatStage),
+    IntlNumberFormatLegacy(IntlNumberFormatLegacyStage),
     JsonStringify(JsonStringifyStage),
     JsonParseReviver,
     SignalState(SignalStateStage),
@@ -1970,6 +1983,22 @@ impl NativeContinuation {
             kind: NativeContinuationKind::IntlNumberFormat(stage),
             first: state,
             second: retained,
+        }
+    }
+
+    /// Roots legacy NumberFormat receiver state across instanceof and fallback Get.
+    #[inline]
+    pub(crate) const fn intl_number_format_legacy(
+        site: NativeContinuationSite,
+        stage: IntlNumberFormatLegacyStage,
+        first: Value,
+        second: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::IntlNumberFormatLegacy(stage),
+            first,
+            second,
         }
     }
 

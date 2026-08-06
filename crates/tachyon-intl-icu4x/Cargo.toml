@@ -11,6 +11,7 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
+fixed_decimal = { version = "=0.7.2", default-features = false }
 icu_collator = { version = "=2.0.0", default-features = false, features = ["compiled_data"] }
 icu_decimal = { version = "=2.0.0", default-features = false, features = ["alloc", "compiled_data"] }
 icu_locale = { version = "=2.0.0", default-features = false, features = ["compiled_data"] }

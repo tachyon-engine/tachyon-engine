@@ -6,6 +6,8 @@ use super::*;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PendingIntlNumberFormat {
     pub(crate) new_target: Value,
+    pub(crate) legacy_receiver: Value,
+    pub(crate) format_value: Value,
     pub(crate) options: Value,
     pub(crate) locales: Value,
     pub(crate) numbering_system: Value,
@@ -43,6 +45,8 @@ impl Trace for PendingIntlNumberFormat {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.new_target.trace(tracer);
+        self.legacy_receiver.trace(tracer);
+        self.format_value.trace(tracer);
         self.options.trace(tracer);
         self.locales.trace(tracer);
         self.numbering_system.trace(tracer);
@@ -73,6 +77,8 @@ impl PendingIntlNumberFormat {
     pub(super) fn new(new_target: Value, options: Value, supported_locales: bool) -> Self {
         Self {
             new_target,
+            legacy_receiver: UNDEFINED,
+            format_value: UNDEFINED,
             options,
             locales: UNDEFINED,
             numbering_system: UNDEFINED,

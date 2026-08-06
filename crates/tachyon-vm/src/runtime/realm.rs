@@ -260,6 +260,7 @@ pub(crate) struct Realm {
     pub(crate) function_constructor: Option<Value>,
     pub(crate) math_object: Option<Value>,
     pub(crate) intl_object: Option<Value>,
+    pub(crate) intl_legacy_constructed_symbol: Option<Value>,
     pub(crate) intl_locale_constructor: Option<Value>,
     pub(crate) intl_locale_prototype: Option<Value>,
     pub(crate) intl_get_canonical_locales: Option<Value>,
@@ -478,6 +479,7 @@ impl Realm {
             function_constructor: None,
             math_object: None,
             intl_object: None,
+            intl_legacy_constructed_symbol: None,
             intl_locale_constructor: None,
             intl_locale_prototype: None,
             intl_get_canonical_locales: None,
@@ -963,6 +965,7 @@ impl Trace for Realm {
         self.function_constructor.trace(tracer);
         self.math_object.trace(tracer);
         self.intl_object.trace(tracer);
+        self.intl_legacy_constructed_symbol.trace(tracer);
         self.intl_locale_constructor.trace(tracer);
         self.intl_locale_prototype.trace(tracer);
         self.intl_get_canonical_locales.trace(tracer);
