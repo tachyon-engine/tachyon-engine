@@ -223,9 +223,7 @@ impl Isolate {
         &mut self,
         receiver: Value,
     ) -> Result<TypedArraySnapshot, ExecutionError> {
-        let snapshot = self.typed_array_snapshot(receiver)?;
-        self.typed_array_backing(snapshot.buffer)?;
-        Ok(snapshot)
+        self.validated_typed_array_snapshot(receiver)
     }
 
     /// Allocates bounded conversion state while tracing every VM and pending Value edge.

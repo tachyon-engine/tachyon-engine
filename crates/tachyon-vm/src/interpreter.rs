@@ -7792,6 +7792,9 @@ impl Isolate {
                     return self.begin_array_splice(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayToString) => {
+                    if self.is_typed_array_value(site.this_value) {
+                        return self.begin_typed_array_join(&site);
+                    }
                     return self.begin_array_join(&site);
                 }
                 FunctionExecutable::Native(

@@ -147,8 +147,7 @@ impl Isolate {
         site: &CallSite,
         kind: ArrayIterationKind,
     ) -> Result<Value, ExecutionError> {
-        let snapshot = self.typed_array_snapshot(site.this_value)?;
-        self.typed_array_backing(snapshot.buffer)?;
+        let _ = self.validated_typed_array_snapshot(site.this_value)?;
         self.create_array_iterator(site.this_value, kind)
     }
 
@@ -1021,23 +1020,14 @@ impl Isolate {
         if getter == TypedArrayGetter::ToStringTag {
             return self.typed_array_to_string_tag(receiver);
         }
-        let snapshot = self.typed_array_snapshot(receiver)?;
-        let attached = match getter {
-            TypedArrayGetter::Length
-            | TypedArrayGetter::ByteLength
-            | TypedArrayGetter::ByteOffset => match self.typed_array_backing(snapshot.buffer) {
-                Ok(_) => true,
-                Err(ExecutionError::DetachedArrayBuffer) => false,
-                Err(error) => return Err(error),
-            },
-            TypedArrayGetter::Buffer => true,
-            TypedArrayGetter::ToStringTag => unreachable!("handled before the branded getters"),
-        };
+        let witness = self.typed_array_witness(receiver)?;
+        let snapshot = witness.snapshot;
+        let valid = !witness.detached && !witness.out_of_bounds;
         Ok(match getter {
-            TypedArrayGetter::Length if !attached => Value::from_i32(0),
+            TypedArrayGetter::Length if !valid => Value::from_i32(0),
             TypedArrayGetter::Length => safe_integer_value(snapshot.length as u64),
             TypedArrayGetter::Buffer => snapshot.buffer,
-            TypedArrayGetter::ByteLength | TypedArrayGetter::ByteOffset if !attached => {
+            TypedArrayGetter::ByteLength | TypedArrayGetter::ByteOffset if !valid => {
                 Value::from_i32(0)
             }
             TypedArrayGetter::ByteLength => safe_integer_value(

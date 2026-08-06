@@ -601,6 +601,12 @@ impl Isolate {
         )?;
         let join_atom = self.intern_intrinsic_name(b"join")?;
         self.set_intrinsic_data_property(base_prototype, join_atom, join, true)?;
+        let to_string = self
+            .realm
+            .array_to_string
+            .expect("Array toString initializes before TypedArray intrinsics");
+        let to_string_atom = self.intern_intrinsic_name(b"toString")?;
+        self.set_intrinsic_data_property(base_prototype, to_string_atom, to_string, true)?;
         let to_locale_string = self.allocate_native_function(
             NativeFunction::TypedArrayToLocaleString,
             OrdinaryObject {

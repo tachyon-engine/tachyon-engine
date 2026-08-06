@@ -11,6 +11,7 @@ impl Isolate {
     /// Sorts a fixed TypedArray with the spec default comparator and one checked writeback.
     pub(crate) fn begin_typed_array_sort(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         let receiver = site.this_value;
+        let snapshot = self.validated_typed_array_snapshot(receiver)?;
         let compare = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -20,7 +21,6 @@ impl Isolate {
             }
             return self.begin_typed_array_callable_sort(site, compare);
         }
-        let snapshot = self.validated_typed_array_snapshot(receiver)?;
         let data = self.typed_array_backing(snapshot.buffer)?;
         let width = snapshot.kind.byte_width();
         let byte_length = snapshot

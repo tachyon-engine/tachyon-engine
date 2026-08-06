@@ -10,7 +10,7 @@ impl Isolate {
         comparator: Value,
     ) -> Result<(), ExecutionError> {
         let receiver = site.this_value;
-        let initial = self.typed_array_snapshot(receiver)?;
+        let initial = self.validated_typed_array_snapshot(receiver)?;
         let undefined = Value::from_immediate(Immediate::Undefined);
         let capacity =
             u64::try_from(initial.length).map_err(|_| ExecutionError::InvalidArrayLength)?;
