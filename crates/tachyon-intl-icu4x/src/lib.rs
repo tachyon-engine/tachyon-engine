@@ -8,8 +8,10 @@
 //! ICU4X-backed locale-data provider for Tachyon's executor-neutral Intl boundary.
 
 mod collator;
+mod date_time_format;
 mod number_format;
 mod supported_values;
+mod tuning;
 
 use icu_locale::{
     Locale, LocaleCanonicalizer,
@@ -17,8 +19,9 @@ use icu_locale::{
     extensions::unicode::{Key, Value},
 };
 use tachyon_vm::{
-    HostProviderError, IntlCollatorCreation, IntlCollatorRequest, IntlLocaleMatcher,
-    IntlNumberFormatCreation, IntlNumberFormatRequest, IntlProvider, IntlSupportedValuesKey,
+    HostProviderError, IntlCollatorCreation, IntlCollatorRequest, IntlDateTimeFormatCreation,
+    IntlDateTimeFormatRequest, IntlLocaleMatcher, IntlNumberFormatCreation,
+    IntlNumberFormatRequest, IntlProvider, IntlSupportedValuesKey,
 };
 
 /// Extension aliases required by UTS 35 but absent from ICU4X 2.0's locale canonicalizer.
@@ -135,6 +138,21 @@ impl IntlProvider for Icu4xIntlProvider {
         matcher: IntlLocaleMatcher,
     ) -> Result<Box<[Box<str>]>, HostProviderError> {
         Ok(number_format::supported_locales(locales, matcher))
+    }
+
+    fn create_date_time_format(
+        &mut self,
+        request: IntlDateTimeFormatRequest,
+    ) -> Result<IntlDateTimeFormatCreation, HostProviderError> {
+        date_time_format::create(self.default_locale.as_ref(), request)
+    }
+
+    fn date_time_format_supported_locales(
+        &mut self,
+        locales: &[Box<str>],
+        matcher: IntlLocaleMatcher,
+    ) -> Result<Box<[Box<str>]>, HostProviderError> {
+        Ok(date_time_format::supported_locales(locales, matcher))
     }
 }
 

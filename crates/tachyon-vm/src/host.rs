@@ -513,6 +513,172 @@ pub struct IntlNumberFormatCreation {
     pub backend: Box<dyn IntlNumberFormatBackend>,
 }
 
+/// Locale-sensitive width shared by textual date-time fields.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlDateTimeTextStyle {
+    Long,
+    Short,
+    Narrow,
+}
+
+/// Width used by numeric date-time fields.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlDateTimeNumericStyle {
+    Numeric,
+    TwoDigit,
+}
+
+/// Month formatting width, including both numeric and textual forms.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlDateTimeMonthStyle {
+    Numeric,
+    TwoDigit,
+    Long,
+    Short,
+    Narrow,
+}
+
+/// Preset date/time style selected by the ECMA-402 style options.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlDateTimeStyle {
+    Full,
+    Long,
+    Medium,
+    Short,
+}
+
+/// Resolved hour cycle used by a DateTimeFormat backend.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlDateTimeHourCycle {
+    H11,
+    H12,
+    H23,
+    H24,
+}
+
+/// Width of the locale-sensitive time-zone name field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlDateTimeZoneNameStyle {
+    Long,
+    Short,
+    ShortOffset,
+    LongOffset,
+    ShortGeneric,
+    LongGeneric,
+}
+
+/// Already converted component and preset options for DateTimeFormat creation.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct IntlDateTimeFormatOptions {
+    pub weekday: Option<IntlDateTimeTextStyle>,
+    pub era: Option<IntlDateTimeTextStyle>,
+    pub year: Option<IntlDateTimeNumericStyle>,
+    pub month: Option<IntlDateTimeMonthStyle>,
+    pub day: Option<IntlDateTimeNumericStyle>,
+    pub day_period: Option<IntlDateTimeTextStyle>,
+    pub hour: Option<IntlDateTimeNumericStyle>,
+    pub minute: Option<IntlDateTimeNumericStyle>,
+    pub second: Option<IntlDateTimeNumericStyle>,
+    pub fractional_second_digits: Option<u8>,
+    pub time_zone_name: Option<IntlDateTimeZoneNameStyle>,
+    pub date_style: Option<IntlDateTimeStyle>,
+    pub time_style: Option<IntlDateTimeStyle>,
+}
+
+/// DateTimeFormat locale negotiation plus converted options and a canonical time-zone ID.
+#[derive(Debug, Eq, PartialEq)]
+pub struct IntlDateTimeFormatRequest {
+    pub locales: Box<[Box<str>]>,
+    pub locale_matcher: IntlLocaleMatcher,
+    pub calendar: Option<Box<str>>,
+    pub numbering_system: Option<Box<str>>,
+    pub hour_cycle: Option<IntlDateTimeHourCycle>,
+    pub hour12: Option<bool>,
+    pub time_zone: Box<str>,
+    pub options: IntlDateTimeFormatOptions,
+}
+
+/// Provider-normalized DateTimeFormat slots published through `resolvedOptions`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntlDateTimeFormatResolved {
+    pub locale: Box<str>,
+    pub calendar: Box<str>,
+    pub numbering_system: Box<str>,
+    pub time_zone: Box<str>,
+    pub hour_cycle: Option<IntlDateTimeHourCycle>,
+    pub options: IntlDateTimeFormatOptions,
+}
+
+/// One UTC instant paired with the host-selected civil offset for the requested zone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IntlDateTimeInput {
+    pub utc_milliseconds: i64,
+    pub offset_milliseconds: i64,
+}
+
+/// Provider-neutral field classification exposed by DateTimeFormat parts APIs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlDateTimePartType {
+    Literal,
+    Era,
+    Year,
+    RelatedYear,
+    YearName,
+    Month,
+    Day,
+    Weekday,
+    DayPeriod,
+    Hour,
+    Minute,
+    Second,
+    FractionalSecond,
+    TimeZoneName,
+    Unknown,
+}
+
+/// One UTF-16 code-unit range in a provider-owned formatted date-time buffer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IntlDateTimePartSpan {
+    pub kind: IntlDateTimePartType,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// One formatted date-time and the ordered, gap-free fields that partition it.
+#[derive(Debug, Eq, PartialEq)]
+pub struct IntlFormattedDateTimeParts {
+    pub formatted: Box<[u16]>,
+    pub spans: Box<[IntlDateTimePartSpan]>,
+}
+
+/// Opaque compiled date-time formatting state retained by a GC external payload.
+pub trait IntlDateTimeFormatBackend: Send {
+    /// Formats one finite TimeClip result and its host-provided civil offset.
+    fn format(&self, input: IntlDateTimeInput) -> Result<Box<[u16]>, HostProviderError>;
+
+    /// Formats one instant and classifies every emitted UTF-16 code unit.
+    fn format_to_parts(
+        &self,
+        input: IntlDateTimeInput,
+    ) -> Result<IntlFormattedDateTimeParts, HostProviderError>;
+
+    /// Reports only heap backing retained beyond the boxed trait object itself.
+    fn external_memory_bytes(&self) -> usize;
+}
+
+/// One resolved DateTimeFormat snapshot paired with its reusable compiled backend.
+pub struct IntlDateTimeFormatCreation {
+    pub resolved: IntlDateTimeFormatResolved,
+    pub backend: Box<dyn IntlDateTimeFormatBackend>,
+}
+
 /// Supplies locale data operations without allowing the VM to read process or filesystem state.
 pub trait IntlProvider: Send {
     /// Returns one canonical BCP 47 locale, or `None` when the input is structurally invalid.
@@ -554,6 +720,23 @@ pub trait IntlProvider: Send {
 
     /// Filters canonical requested locales using NumberFormat locale data.
     fn number_format_supported_locales(
+        &mut self,
+        _locales: &[Box<str>],
+        _matcher: IntlLocaleMatcher,
+    ) -> Result<Box<[Box<str>]>, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+
+    /// Creates reusable provider-owned date-time formatting state from converted inputs.
+    fn create_date_time_format(
+        &mut self,
+        _request: IntlDateTimeFormatRequest,
+    ) -> Result<IntlDateTimeFormatCreation, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+
+    /// Filters canonical requested locales using DateTimeFormat locale data.
+    fn date_time_format_supported_locales(
         &mut self,
         _locales: &[Box<str>],
         _matcher: IntlLocaleMatcher,
