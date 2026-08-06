@@ -2097,6 +2097,18 @@ impl Isolate {
                     self.settle_promise(promise, PromiseState::Rejected, error)?;
                     return Ok(None);
                 }
+                if self.is_object_value(options) {
+                    let with_atom = self.intern_intrinsic_name(b"with")?;
+                    let with_value = self.get_data_property(options, with_atom)?;
+                    if let Some(with_value) = with_value
+                        && with_value.as_immediate() != Some(Immediate::Undefined)
+                        && !self.is_object_value(with_value)
+                    {
+                        let error = self.create_native_error(NativeErrorKind::Type, None)?;
+                        self.settle_promise(promise, PromiseState::Rejected, error)?;
+                        return Ok(None);
+                    }
+                }
                 if self.is_object_value(source) {
                     let conversion = self.dispatch_object_primitive_conversion(
                         ConversionConsumer::DynamicImportSource,
