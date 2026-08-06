@@ -102,8 +102,8 @@ pub use finalization::{
 pub use host::{
     AgentBroadcast, AgentBroadcastValue, AgentHostProvider, AtomicsAsyncWait,
     AtomicsAsyncWaitStart, AtomicsWaitLocation, AtomicsWaitResult, AtomicsWaiterProvider,
-    HostProviderError, HostProviders, IntlProvider, SharedMemoryId, TimeZoneProvider,
-    WallClockProvider,
+    HostProviderError, HostProviders, IntlProvider, IntlSupportedValuesKey, SharedMemoryId,
+    TimeZoneProvider, WallClockProvider,
 };
 pub use isolate::Isolate;
 pub use module::{
@@ -557,6 +557,7 @@ pub enum ExecutionError {
     InvalidStringRepeatCount(Value),
     InvalidNormalizationForm,
     InvalidLanguageTag,
+    InvalidIntlSupportedValuesKey,
     InvalidLocaleListElement(Value),
     InvalidUriEncoding,
     UnsupportedTypeof(Value),

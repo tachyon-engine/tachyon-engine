@@ -773,7 +773,11 @@ pub(crate) enum NativeFunction {
     FinalizationRegistryUnregister,
     IntlLocaleConstructor,
     IntlLocaleToString,
+    IntlLocaleCalendar,
+    IntlLocaleCollation,
+    IntlLocaleNumberingSystem,
     IntlGetCanonicalLocales,
+    IntlSupportedValuesOf,
     JsonParse,
     JsonStringify,
     MathAbs,
@@ -1569,8 +1573,13 @@ impl NativeFunction {
             | Self::SymbolDescription
             | Self::NumberToLocaleString => 0,
             Self::SymbolToPrimitive => 1,
-            Self::IntlLocaleConstructor | Self::IntlGetCanonicalLocales => 1,
-            Self::IntlLocaleToString => 0,
+            Self::IntlLocaleConstructor
+            | Self::IntlGetCanonicalLocales
+            | Self::IntlSupportedValuesOf => 1,
+            Self::IntlLocaleToString
+            | Self::IntlLocaleCalendar
+            | Self::IntlLocaleCollation
+            | Self::IntlLocaleNumberingSystem => 0,
             Self::JsonParse => 2,
             Self::JsonStringify => 3,
             Self::HostCreateRealm => 0,
@@ -1988,7 +1997,11 @@ impl NativeFunction {
             Self::FinalizationRegistryUnregister => "unregister",
             Self::IntlLocaleConstructor => "Locale",
             Self::IntlLocaleToString => "toString",
+            Self::IntlLocaleCalendar => "get calendar",
+            Self::IntlLocaleCollation => "get collation",
+            Self::IntlLocaleNumberingSystem => "get numberingSystem",
             Self::IntlGetCanonicalLocales => "getCanonicalLocales",
+            Self::IntlSupportedValuesOf => "supportedValuesOf",
             Self::JsonParse => "parse",
             Self::JsonStringify => "stringify",
             Self::HostCreateRealm => "createRealm",
@@ -2785,6 +2798,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidStringRepeatCount(_)
         | ExecutionError::NegativeSetSize(_)
         | ExecutionError::InvalidNormalizationForm
+        | ExecutionError::InvalidIntlSupportedValuesKey
         | ExecutionError::InvalidLanguageTag => Some(NativeErrorKind::Range),
         ExecutionError::InvalidUriEncoding => Some(NativeErrorKind::Uri),
         _ => None,

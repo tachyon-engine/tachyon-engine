@@ -4038,6 +4038,16 @@ impl Isolate {
         )?;
         let to_string_atom = self.intern_intrinsic_name(b"toString")?;
         self.set_intrinsic_data_property(locale_prototype, to_string_atom, locale_to_string, true)?;
+        for (name, native) in [
+            (b"calendar".as_slice(), NativeFunction::IntlLocaleCalendar),
+            (b"collation".as_slice(), NativeFunction::IntlLocaleCollation),
+            (
+                b"numberingSystem".as_slice(),
+                NativeFunction::IntlLocaleNumberingSystem,
+            ),
+        ] {
+            self.install_collection_accessor(locale_prototype, function_prototype, name, native)?;
+        }
         let method = self.allocate_native_function(
             NativeFunction::IntlGetCanonicalLocales,
             OrdinaryObject {
@@ -4050,6 +4060,18 @@ impl Isolate {
         self.realm.intl_get_canonical_locales = Some(method);
         let method_atom = self.intern_intrinsic_name(b"getCanonicalLocales")?;
         self.set_intrinsic_data_property(object, method_atom, method, true)?;
+        let supported_values = self.allocate_native_function(
+            NativeFunction::IntlSupportedValuesOf,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.intl_supported_values_of = Some(supported_values);
+        let supported_values_atom = self.intern_intrinsic_name(b"supportedValuesOf")?;
+        self.set_intrinsic_data_property(object, supported_values_atom, supported_values, true)?;
         let tag_symbol = self
             .agent
             .well_known_symbols

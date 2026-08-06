@@ -354,6 +354,7 @@ pub(crate) enum ConversionConsumer {
     DateToJson,
     IntlLocaleListLength,
     IntlLocaleListElement,
+    IntlSupportedValuesKey,
     JsonParseText,
     JsonStringifyNumberSpace,
     JsonStringifyStringSpace,
@@ -509,6 +510,7 @@ impl ConversionConsumer {
             | Self::DateToJson
             | Self::IntlLocaleListLength
             | Self::IntlLocaleListElement
+            | Self::IntlSupportedValuesKey
             | Self::JsonParseText
             | Self::JsonStringifyNumberSpace
             | Self::JsonStringifyStringSpace
@@ -659,6 +661,7 @@ impl ConversionConsumer {
                 | Self::DynamicFunctionArgument
                 | Self::DateToPrimitiveString
                 | Self::IntlLocaleListElement
+                | Self::IntlSupportedValuesKey
                 | Self::JsonParseText
                 | Self::JsonStringifyStringSpace
                 | Self::JsonStringifyStringValue
@@ -744,6 +747,7 @@ impl ConversionConsumer {
                 | Self::DateToJson
                 | Self::IntlLocaleListLength
                 | Self::IntlLocaleListElement
+                | Self::IntlSupportedValuesKey
                 | Self::JsonParseText
                 | Self::JsonStringifyNumberSpace
                 | Self::JsonStringifyStringSpace

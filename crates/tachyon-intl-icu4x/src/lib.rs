@@ -7,12 +7,14 @@
 )]
 //! ICU4X-backed locale-data provider for Tachyon's executor-neutral Intl boundary.
 
+mod supported_values;
+
 use icu_locale::{
     Locale, LocaleCanonicalizer,
     extensions::transform::{Key as TransformKey, Value as TransformValue},
     extensions::unicode::{Key, Value},
 };
-use tachyon_vm::{HostProviderError, IntlProvider};
+use tachyon_vm::{HostProviderError, IntlProvider, IntlSupportedValuesKey};
 
 /// Extension aliases required by UTS 35 but absent from ICU4X 2.0's locale canonicalizer.
 ///
@@ -57,7 +59,6 @@ impl UnicodeExtensionAlias {
 
 /// Locale provider using ICU4X compiled data without runtime filesystem access.
 pub struct Icu4xIntlProvider {
-    canonicalizer: LocaleCanonicalizer,
     default_locale: Box<str>,
 }
 
@@ -71,7 +72,6 @@ impl Icu4xIntlProvider {
         canonicalizer.canonicalize(&mut locale);
         canonicalize_unicode_extension_aliases(&mut locale);
         Ok(Self {
-            canonicalizer,
             default_locale: locale.to_string().into_boxed_str(),
         })
     }
@@ -85,7 +85,7 @@ impl IntlProvider for Icu4xIntlProvider {
         let Ok(mut locale) = locale.parse::<Locale>() else {
             return Ok(None);
         };
-        self.canonicalizer.canonicalize(&mut locale);
+        LocaleCanonicalizer::new_extended().canonicalize(&mut locale);
         canonicalize_unicode_extension_aliases(&mut locale);
         canonicalize_transform_extension_aliases(&mut locale);
         Ok(Some(locale.to_string().into_boxed_str()))
@@ -93,6 +93,13 @@ impl IntlProvider for Icu4xIntlProvider {
 
     fn default_locale(&mut self) -> Result<Box<str>, HostProviderError> {
         Ok(self.default_locale.clone())
+    }
+
+    fn supported_values(
+        &mut self,
+        key: IntlSupportedValuesKey,
+    ) -> Result<Box<[Box<str>]>, HostProviderError> {
+        Ok(supported_values::supported_values(key))
     }
 }
 

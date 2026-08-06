@@ -22,6 +22,94 @@ impl Trace for IntlLocaleListRoots<'_> {
 }
 
 impl Isolate {
+    /// Starts `Intl.supportedValuesOf`, preserving observable ToString for object keys.
+    pub(crate) fn begin_intl_supported_values_of(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let key = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let continuation_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        if self.is_object_value(key) {
+            return self.dispatch_object_primitive_conversion(
+                ConversionConsumer::IntlSupportedValuesKey,
+                site.caller_base,
+                site.destination,
+                Value::from_immediate(Immediate::Undefined),
+                key,
+                site.call_site,
+            );
+        }
+        let key = self.primitive_to_string_value(key)?;
+        self.finish_intl_supported_values_of(continuation_site, key)
+    }
+
+    /// Materializes one provider collection into a freshly allocated intrinsic Array.
+    pub(crate) fn finish_intl_supported_values_of(
+        &mut self,
+        site: NativeContinuationSite,
+        key: Value,
+    ) -> Result<(), ExecutionError> {
+        let key = self.intl_supported_values_key(key)?;
+        let mut values = self
+            .host_providers
+            .intl_mut()
+            .ok_or(ExecutionError::MissingIntlProvider)?
+            .supported_values(key)
+            .map_err(ExecutionError::IntlProvider)?
+            .into_vec();
+        values.sort_unstable();
+        values.dedup();
+        let result = self.create_array_object_with_prototype(
+            self.realm
+                .array_prototype
+                .expect("Array prototype initializes before Intl"),
+        )?;
+        self.write(site.caller_base, site.destination, result)?;
+        for (index, value) in values.into_iter().enumerate() {
+            let result = self.read(site.caller_base, site.destination)?;
+            let (value, result) = self.allocate_runtime_string_retaining(
+                JsString::try_from_str(&value).map_err(ExecutionError::PropertyKeyString)?,
+                result,
+            )?;
+            self.write(site.caller_base, site.destination, result)?;
+            let index = u32::try_from(index).map_err(|_| ExecutionError::ArrayLengthOverflow)?;
+            let property = self.property_key_atom(safe_integer_value(u64::from(index)))?;
+            let result = self.read(site.caller_base, site.destination)?;
+            self.set_own_data_property(result, property, value)?;
+        }
+        Ok(())
+    }
+
+    /// Recognizes the six case-sensitive ECMA-402 enumeration keys without host parsing.
+    fn intl_supported_values_key(
+        &mut self,
+        key: Value,
+    ) -> Result<IntlSupportedValuesKey, ExecutionError> {
+        let units = self.string_value_to_utf16(key)?;
+        for (name, key) in [
+            (b"calendar".as_slice(), IntlSupportedValuesKey::Calendar),
+            (b"collation".as_slice(), IntlSupportedValuesKey::Collation),
+            (b"currency".as_slice(), IntlSupportedValuesKey::Currency),
+            (
+                b"numberingSystem".as_slice(),
+                IntlSupportedValuesKey::NumberingSystem,
+            ),
+            (b"timeZone".as_slice(), IntlSupportedValuesKey::TimeZone),
+            (b"unit".as_slice(), IntlSupportedValuesKey::Unit),
+        ] {
+            if intl_utf16_equals_ascii(&units, name) {
+                return Ok(key);
+            }
+        }
+        Err(ExecutionError::InvalidIntlSupportedValuesKey)
+    }
+
     /// Constructs the initial `Intl.Locale` internal-slot surface used by locale-list consumers.
     pub(crate) fn create_intl_locale_from_site(
         &mut self,
@@ -52,26 +140,36 @@ impl Isolate {
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         if options.as_immediate() != Some(Immediate::Undefined) {
             let options = self.coerce_to_object(options)?;
-            let calendar_atom = self.intern_intrinsic_name(b"calendar")?;
-            let calendar = self
-                .get_data_property(options, calendar_atom)?
-                .unwrap_or(Value::from_immediate(Immediate::Undefined));
-            if calendar.as_immediate() != Some(Immediate::Undefined) {
-                let calendar = if self.is_string_value(calendar) {
-                    calendar
-                } else if self.is_object_value(calendar) {
-                    return Err(ExecutionError::InvalidLocaleListElement(calendar));
-                } else {
-                    self.primitive_to_string_value(calendar)?
-                };
-                let calendar = self.string_value_to_ascii(calendar)?;
+            let mut extensions = Vec::new();
+            extensions
+                .try_reserve_exact(3)
+                .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+            for (property, key) in [
+                (b"calendar".as_slice(), "ca"),
+                (b"collation".as_slice(), "co"),
+                (b"numberingSystem".as_slice(), "nu"),
+            ] {
+                if let Some(value) = self.intl_locale_option(options, property)? {
+                    extensions.push((key, value));
+                }
+            }
+            if !extensions.is_empty() {
+                let extension_len = extensions
+                    .iter()
+                    .map(|(key, value)| 3 + key.len() + value.len())
+                    .sum::<usize>();
                 let mut combined = String::new();
                 combined
-                    .try_reserve_exact(canonical.len() + 6 + calendar.len())
+                    .try_reserve_exact(canonical.len() + 2 + extension_len)
                     .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
                 combined.push_str(&canonical);
-                combined.push_str("-u-ca-");
-                combined.push_str(&calendar);
+                combined.push_str("-u");
+                for (key, value) in extensions {
+                    combined.push('-');
+                    combined.push_str(key);
+                    combined.push('-');
+                    combined.push_str(&value);
+                }
                 canonical = self.canonicalize_intl_ascii_tag(&combined)?;
             }
         }
@@ -98,6 +196,51 @@ impl Isolate {
             .checked_reference(raw, self.types.string_object)
             .map_err(|_| ExecutionError::InvalidLocaleListElement(receiver))?;
         self.string_primitive_value(receiver)
+    }
+
+    /// Returns one canonical Unicode extension value from the temporary Locale tag carrier.
+    pub(crate) fn intl_locale_extension_value(
+        &mut self,
+        receiver: Value,
+        native: NativeFunction,
+    ) -> Result<Value, ExecutionError> {
+        let tag = self.intl_locale_to_string(receiver)?;
+        let tag = self.string_value_to_ascii(tag)?;
+        let key = match native {
+            NativeFunction::IntlLocaleCalendar => "ca",
+            NativeFunction::IntlLocaleCollation => "co",
+            NativeFunction::IntlLocaleNumberingSystem => "nu",
+            _ => unreachable!("only Intl.Locale extension getters enter this path"),
+        };
+        let Some(value) = intl_unicode_extension_value(&tag, key)? else {
+            return Ok(Value::from_immediate(Immediate::Undefined));
+        };
+        self.allocate_runtime_string(
+            JsString::try_from_str(&value).map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
+    /// Reads one initial Locale option and converts the current primitive-only carrier input.
+    fn intl_locale_option(
+        &mut self,
+        options: Value,
+        property: &[u8],
+    ) -> Result<Option<String>, ExecutionError> {
+        let property = self.intern_intrinsic_name(property)?;
+        let value = self
+            .get_data_property(options, property)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if value.as_immediate() == Some(Immediate::Undefined) {
+            return Ok(None);
+        }
+        let value = if self.is_string_value(value) {
+            value
+        } else if self.is_object_value(value) {
+            return Err(ExecutionError::InvalidLocaleListElement(value));
+        } else {
+            self.primitive_to_string_value(value)?
+        };
+        self.string_value_to_ascii(value).map(Some)
     }
 
     /// Starts `Intl.getCanonicalLocales`, preserving every observable array-like access.
@@ -504,6 +647,50 @@ impl Isolate {
             )
             .map_err(ExecutionError::HeapAllocation)
     }
+}
+
+/// Extracts a multi-subtag type from one canonical `-u-` extension without allocating a token Vec.
+fn intl_unicode_extension_value(
+    tag: &str,
+    expected: &str,
+) -> Result<Option<String>, ExecutionError> {
+    let mut tokens = tag.split('-');
+    while tokens.next().is_some_and(|token| token != "u") {}
+    let mut current_key = None;
+    let mut output = String::new();
+    for token in tokens {
+        if token.len() == 1 {
+            break;
+        }
+        if token.len() == 2 {
+            if current_key == Some(expected) {
+                return Ok((!output.is_empty()).then_some(output));
+            }
+            current_key = Some(token);
+            output.clear();
+            continue;
+        }
+        if current_key == Some(expected) {
+            let separator = !output.is_empty();
+            output
+                .try_reserve_exact(token.len() + usize::from(separator))
+                .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+            if separator {
+                output.push('-');
+            }
+            output.push_str(token);
+        }
+    }
+    Ok((current_key == Some(expected) && !output.is_empty()).then_some(output))
+}
+
+#[inline(always)]
+fn intl_utf16_equals_ascii(units: &[u16], ascii: &[u8]) -> bool {
+    units.len() == ascii.len()
+        && units
+            .iter()
+            .zip(ascii)
+            .all(|(unit, byte)| *unit == u16::from(*byte))
 }
 
 #[inline(always)]

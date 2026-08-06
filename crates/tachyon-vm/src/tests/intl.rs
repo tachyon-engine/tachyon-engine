@@ -25,6 +25,25 @@ impl IntlProvider for TestIntlProvider {
     fn default_locale(&mut self) -> Result<Box<str>, HostProviderError> {
         Ok("en-US".into())
     }
+
+    fn supported_values(
+        &mut self,
+        key: IntlSupportedValuesKey,
+    ) -> Result<Box<[Box<str>]>, HostProviderError> {
+        let values = match key {
+            IntlSupportedValuesKey::Calendar => ["gregory", "buddhist", "gregory"].as_slice(),
+            IntlSupportedValuesKey::Collation => ["emoji"].as_slice(),
+            IntlSupportedValuesKey::Currency => ["USD"].as_slice(),
+            IntlSupportedValuesKey::NumberingSystem => ["latn"].as_slice(),
+            IntlSupportedValuesKey::TimeZone => ["UTC"].as_slice(),
+            IntlSupportedValuesKey::Unit => ["meter"].as_slice(),
+        };
+        Ok(values
+            .iter()
+            .map(|value| Box::<str>::from(*value))
+            .collect::<Vec<_>>()
+            .into_boxed_slice())
+    }
 }
 
 const INTL_SOURCE: &str = r#"
@@ -60,6 +79,40 @@ tag.value === "Intl" && tag.writable === false &&
 tag.enumerable === false && tag.configurable === true && typeError && rangeError;
 "#;
 
+const SUPPORTED_VALUES_SOURCE: &str = r#"
+var trace = "";
+var key = {
+  get toString() {
+    trace += "g";
+    return function () { trace += "c"; return "calendar"; };
+  }
+};
+Array.prototype.push = function () { throw new Error("push must not be observed"); };
+Array.prototype.sort = function () { throw new Error("sort must not be observed"); };
+var first = Intl.supportedValuesOf(key);
+var second = Intl.supportedValuesOf("calendar");
+var invalidRange = false;
+var symbolType = false;
+var constructType = false;
+try { Intl.supportedValuesOf("calendar\0"); } catch (error) { invalidRange = error instanceof RangeError; }
+try { Intl.supportedValuesOf(Symbol()); } catch (error) { symbolType = error instanceof TypeError; }
+try { new Intl.supportedValuesOf("calendar"); } catch (error) { constructType = error instanceof TypeError; }
+var descriptor = Object.getOwnPropertyDescriptor(Intl, "supportedValuesOf");
+trace === "gc" && Array.isArray(first) && first !== second &&
+Object.getPrototypeOf(first) === Array.prototype && first.length === 2 &&
+first[0] === "buddhist" && first[1] === "gregory" &&
+Intl.supportedValuesOf("collation")[0] === "emoji" &&
+Intl.supportedValuesOf("currency")[0] === "USD" &&
+Intl.supportedValuesOf("numberingSystem")[0] === "latn" &&
+Intl.supportedValuesOf("timeZone")[0] === "UTC" &&
+Intl.supportedValuesOf("unit")[0] === "meter" &&
+Intl.supportedValuesOf.name === "supportedValuesOf" &&
+Intl.supportedValuesOf.length === 1 &&
+!("prototype" in Intl.supportedValuesOf) && Object.isExtensible(Intl.supportedValuesOf) &&
+descriptor.writable && !descriptor.enumerable && descriptor.configurable &&
+invalidRange && symbolType && constructType;
+"#;
+
 #[test]
 fn intl_locale_lists_are_stable_for_every_dispatch_batch() {
     assert_intl_batch::<1>(false);
@@ -75,6 +128,20 @@ fn intl_locale_lists_survive_forced_major_collection() {
 }
 
 #[test]
+fn intl_supported_values_are_stable_for_every_dispatch_batch() {
+    assert_supported_values_batch::<1>(false);
+    assert_supported_values_batch::<2>(false);
+    assert_supported_values_batch::<4>(false);
+    assert_supported_values_batch::<8>(false);
+    assert_supported_values_batch::<16>(false);
+}
+
+#[test]
+fn intl_supported_values_survive_forced_major_collection() {
+    assert_supported_values_batch::<8>(true);
+}
+
+#[test]
 fn intl_provider_absence_remains_an_explicit_host_error() {
     let module = compile_intl_source("Intl.getCanonicalLocales('en');", 10_099);
     let error = test_isolate_without_intl()
@@ -86,6 +153,21 @@ fn intl_provider_absence_remains_an_explicit_host_error() {
             },
         )
         .expect_err("Intl without a provider must not consult process locale");
+    assert_eq!(error, ExecutionError::MissingIntlProvider);
+}
+
+#[test]
+fn intl_supported_values_provider_absence_is_explicit_after_key_validation() {
+    let module = compile_intl_source("Intl.supportedValuesOf('calendar');", 10_098);
+    let error = test_isolate_without_intl()
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 8_192,
+                quantum: 8_192,
+            },
+        )
+        .expect_err("Intl enumeration without a provider must stay explicit");
     assert_eq!(error, ExecutionError::MissingIntlProvider);
 }
 
@@ -107,6 +189,18 @@ fn intl_locale_objects_feed_canonical_locale_lists() {
         (
             "Intl.getCanonicalLocales([new Intl.Locale('fr-CA')])[0] === 'fr-CA'",
             "Locale list internal tag",
+        ),
+        (
+            "new Intl.Locale('und', { calendar: 'islamic-civil' }).calendar === 'islamic-civil'",
+            "Locale calendar getter",
+        ),
+        (
+            "new Intl.Locale('und', { collation: 'emoji' }).collation === 'emoji'",
+            "Locale collation getter",
+        ),
+        (
+            "new Intl.Locale('und', { numberingSystem: 'latn' }).numberingSystem === 'latn'",
+            "Locale numbering-system getter",
         ),
     ];
     for (index, (source, label)) in cases.into_iter().enumerate() {
@@ -159,6 +253,30 @@ fn assert_intl_batch<const N: usize>(forced_major: bool) {
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "Intl batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Executes provider enumeration under one dispatch and moving-collection policy.
+fn assert_supported_values_batch<const N: usize>(forced_major: bool) {
+    let module = compile_intl_source(SUPPORTED_VALUES_SOURCE, 10_200 + N as u32);
+    let mut isolate = intl_test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("Intl supported-values fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "Intl supported-values batch {N}, forced_major={forced_major} returned {outcome:?}"
     );
 }
 

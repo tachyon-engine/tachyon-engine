@@ -170,6 +170,17 @@ pub trait TimeZoneProvider: Send {
     ) -> Result<i64, HostProviderError>;
 }
 
+/// Provider-owned data collections exposed by `Intl.supportedValuesOf`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IntlSupportedValuesKey {
+    Calendar,
+    Collation,
+    Currency,
+    NumberingSystem,
+    TimeZone,
+    Unit,
+}
+
 /// Supplies locale data operations without allowing the VM to read process or filesystem state.
 pub trait IntlProvider: Send {
     /// Returns one canonical BCP 47 locale, or `None` when the input is structurally invalid.
@@ -177,6 +188,12 @@ pub trait IntlProvider: Send {
 
     /// Returns the provider's canonical default locale.
     fn default_locale(&mut self) -> Result<Box<str>, HostProviderError>;
+
+    /// Returns the provider's supported values as owned strings with no borrowed ICU backing.
+    fn supported_values(
+        &mut self,
+        key: IntlSupportedValuesKey,
+    ) -> Result<Box<[Box<str>]>, HostProviderError>;
 }
 
 /// Isolate-owned host capabilities; absence remains explicit instead of consulting the process.

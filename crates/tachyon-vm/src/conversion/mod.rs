@@ -572,6 +572,10 @@ impl Isolate {
                             string,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::IntlSupportedValuesKey {
+                        let key = self.primitive_to_string_value(value)?;
+                        return self.finish_intl_supported_values_of(continuation.site, key);
+                    }
                     if continuation.consumer == ConversionConsumer::AddLeft {
                         let left = value;
                         let right = continuation.receiver;
@@ -1669,7 +1673,8 @@ impl Isolate {
                     unreachable!("Date toJSON resumes inside the conversion state machine")
                 }
                 ConversionConsumer::IntlLocaleListLength
-                | ConversionConsumer::IntlLocaleListElement => {
+                | ConversionConsumer::IntlLocaleListElement
+                | ConversionConsumer::IntlSupportedValuesKey => {
                     unreachable!("Intl locale-list conversion resumes inside its state machine")
                 }
                 ConversionConsumer::JsonParseText => {

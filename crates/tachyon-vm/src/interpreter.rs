@@ -7924,11 +7924,22 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::IntlGetCanonicalLocales) => {
                     return self.begin_intl_get_canonical_locales(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::IntlSupportedValuesOf) => {
+                    return self.begin_intl_supported_values_of(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::IntlLocaleConstructor) => {
                     return self.create_intl_locale_from_site(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::IntlLocaleToString) => {
                     let value = self.intl_locale_to_string(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(
+                    native @ (NativeFunction::IntlLocaleCalendar
+                    | NativeFunction::IntlLocaleCollation
+                    | NativeFunction::IntlLocaleNumberingSystem),
+                ) => {
+                    let value = self.intl_locale_extension_value(site.this_value, native)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::JsonParse) => {
