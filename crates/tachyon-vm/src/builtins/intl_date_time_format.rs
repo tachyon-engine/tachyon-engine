@@ -17,6 +17,11 @@ struct IntlDateTimeFormatBoundRoots<'a> {
     data: Option<GcRef<BoundFunctionData>>,
 }
 
+struct IntlDateTimeFormatValueRoots<'a> {
+    vm: VmRoots<'a>,
+    state: NativeCallState,
+}
+
 impl Trace for IntlDateTimeFormatBoundRoots<'_> {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
@@ -25,6 +30,14 @@ impl Trace for IntlDateTimeFormatBoundRoots<'_> {
         self.date_time_format.trace(tracer);
         self.name.trace(tracer);
         self.data.trace(tracer);
+    }
+}
+
+impl Trace for IntlDateTimeFormatValueRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.state.trace(tracer);
     }
 }
 
@@ -193,7 +206,7 @@ impl Isolate {
         site: &CallSite,
         output: IntlDateTimeFormatOutput,
     ) -> Result<(), ExecutionError> {
-        let formatter = self.intl_date_time_format_reference(site.this_value)?;
+        self.intl_date_time_format_reference(site.this_value)?;
         let value = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -203,16 +216,81 @@ impl Isolate {
                 .ok_or(ExecutionError::MissingWallClockProvider)?
                 .unix_time_milliseconds()
                 .map_err(ExecutionError::WallClockProvider)?
-        } else if self.is_object_value(value) {
-            let date_value = self
-                .date_time_value(value)?
-                .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
-            time_clip_to_i64(date_value)?
         } else {
-            let number = numeric_value(self.convert_to_number(value)?)
-                .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
-            time_clip_to_i64(number)?
+            if self.is_object_value(value) {
+                let state = self.allocate_intl_date_time_format_value_state(NativeCallState {
+                    values: [
+                        site.this_value,
+                        boolean_value(output == IntlDateTimeFormatOutput::Parts),
+                        Value::from_immediate(Immediate::Undefined),
+                        Value::from_immediate(Immediate::Undefined),
+                        Value::from_immediate(Immediate::Undefined),
+                    ],
+                    count: 0,
+                })?;
+                return self.dispatch_object_primitive_conversion(
+                    ConversionConsumer::IntlDateTimeFormatValue,
+                    site.caller_base,
+                    site.destination,
+                    Value::from_heap_ref(state.raw()),
+                    value,
+                    site.call_site,
+                );
+            }
+            return self.finish_intl_date_time_format_primitive(
+                Self::native_site(site),
+                site.this_value,
+                value,
+                output,
+            );
         };
+        self.finish_intl_date_time_format_milliseconds(
+            Self::native_site(site),
+            site.this_value,
+            milliseconds,
+            output,
+        )
+    }
+
+    /// Continues single-value formatting after observable number-hint ToPrimitive.
+    pub(crate) fn resume_intl_date_time_format_value_conversion(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        primitive: Value,
+    ) -> Result<(), ExecutionError> {
+        let snapshot = self.native_call_state_snapshot(state)?;
+        let output = if snapshot.values[1].as_immediate() == Some(Immediate::True) {
+            IntlDateTimeFormatOutput::Parts
+        } else {
+            IntlDateTimeFormatOutput::String
+        };
+        self.finish_intl_date_time_format_primitive(site, snapshot.values[0], primitive, output)
+    }
+
+    /// Converts one primitive to a clipped finite millisecond value before provider access.
+    fn finish_intl_date_time_format_primitive(
+        &mut self,
+        site: NativeContinuationSite,
+        formatter_value: Value,
+        primitive: Value,
+        output: IntlDateTimeFormatOutput,
+    ) -> Result<(), ExecutionError> {
+        let number = numeric_value(self.convert_to_number(primitive)?)
+            .ok_or(ExecutionError::UnsupportedNumberConversion(primitive))?;
+        let milliseconds = time_clip_to_i64(number)?;
+        self.finish_intl_date_time_format_milliseconds(site, formatter_value, milliseconds, output)
+    }
+
+    /// Performs host offset lookup and formatting after all JavaScript conversion has finished.
+    fn finish_intl_date_time_format_milliseconds(
+        &mut self,
+        site: NativeContinuationSite,
+        formatter_value: Value,
+        milliseconds: i64,
+        output: IntlDateTimeFormatOutput,
+    ) -> Result<(), ExecutionError> {
+        let formatter = self.intl_date_time_format_reference(formatter_value)?;
         let payload = self.intl_date_time_format_snapshot(formatter)?.payload;
         let time_zone = self.intl_date_time_format_resolved(formatter)?.time_zone;
         let offset = self
@@ -236,9 +314,39 @@ impl Isolate {
             }
             IntlDateTimeFormatOutput::Parts => {
                 let parts = self.format_intl_date_time_parts_payload(payload, input)?;
-                self.materialize_intl_date_time_parts(Self::native_site(site), parts)
+                self.materialize_intl_date_time_parts(site, parts)
             }
         }
+    }
+
+    /// Allocates fixed traced state before a single formatting argument invokes JavaScript.
+    fn allocate_intl_date_time_format_value_state(
+        &mut self,
+        state: NativeCallState,
+    ) -> Result<GcRef<NativeCallState>, ExecutionError> {
+        let mut roots = IntlDateTimeFormatValueRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
+                loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
+            },
+            state,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.native_call_state,
+                0,
+                0,
+                roots.state,
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)
     }
 
     /// Publishes a fresh resolved-options record in the ECMA-402 property order.

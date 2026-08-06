@@ -15,6 +15,17 @@ const format = formatter.format;
 const parts = formatter.formatToParts(new Date(0));
 const range = formatter.formatRange({ valueOf() { return 0; } }, new Date(1));
 const rangeParts = formatter.formatRangeToParts(new Date(0), { valueOf() { return 1; } });
+let singleValueOf = 0;
+const singleParts = formatter.formatToParts({
+  valueOf() { singleValueOf += 1; return 0; }
+});
+const marker = {};
+let abruptIdentity = false;
+try {
+  formatter.formatToParts({ valueOf() { throw marker; } });
+} catch (error) {
+  abruptIdentity = error === marker;
+}
 let optionGets = 0;
 const observed = new Intl.DateTimeFormat("en-US", new Proxy({
   year: { toString() { return "numeric"; } },
@@ -51,6 +62,7 @@ parts[4].type === "year" && parts[4].value === "1970" &&
 range === "01/01/1970" && rangeParts.length === 5 &&
 rangeParts[0].type === "month" && rangeParts[0].source === "shared" &&
 rangeParts[4].value === "1970" && rangeParts[4].source === "shared" &&
+singleParts.length === 5 && singleValueOf === 1 && abruptIdentity &&
 optionGets === 20 && observedResolved.year === "numeric" &&
 observedResolved.fractionalSecondDigits === 2 &&
 supported.length === 1 && supported[0] === "en-US" && legacy === legacyReceiver &&

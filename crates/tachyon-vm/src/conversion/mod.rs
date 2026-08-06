@@ -440,6 +440,14 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::IntlDateTimeFormatValue {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_intl_date_time_format_value_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
                     if matches!(
                         continuation.consumer,
                         ConversionConsumer::IntlDateTimeFormatRangeStart
@@ -1701,6 +1709,9 @@ impl Isolate {
                 }
                 ConversionConsumer::IntlNumberFormatValue => {
                     unreachable!("NumberFormat value conversion resumes inside its state machine")
+                }
+                ConversionConsumer::IntlDateTimeFormatValue => {
+                    unreachable!("DateTimeFormat value conversion resumes inside its state machine")
                 }
                 ConversionConsumer::IntlDateTimeFormatStringOption
                 | ConversionConsumer::IntlDateTimeFormatNumberOption => {
