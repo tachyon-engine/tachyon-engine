@@ -551,14 +551,14 @@ impl Isolate {
                 self.finish_promise_reaction_job(site)?;
                 return Ok(false);
             }
-            let frame_depth = self.fiber.frames.len();
+            let fiber_token = self.fiber.execution_token();
             self.begin_promise_resolution(
                 capability,
                 argument,
                 site,
                 PromiseResolutionMode::Reaction,
             )?;
-            return Ok(self.fiber.frames.len() != frame_depth);
+            return Ok(self.fiber.execution_token() != fiber_token);
         };
         let callback = if reject {
             generic.reject
@@ -584,7 +584,7 @@ impl Isolate {
                 site, capability,
             ))
             .map_err(Isolate::completion_stack_error)?;
-        let frame_depth = self.fiber.frames.len();
+        let fiber_token = self.fiber.execution_token();
         if let Err(error) = self.call(CallSite {
             caller_base: site.caller_base,
             destination: site.destination,
@@ -604,7 +604,7 @@ impl Isolate {
             self.promise_jobs.finish_active();
             return Err(error);
         }
-        if self.fiber.frames.len() != frame_depth {
+        if self.fiber.execution_token() != fiber_token {
             let frame = self
                 .fiber
                 .frames

@@ -3,12 +3,9 @@ use std::{
     future::Future,
     num::NonZeroU32,
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
+    sync::{Arc, Condvar, Mutex, mpsc},
     task::{Context, Wake, Waker},
+    time::Duration,
 };
 
 use tachyon_compiler::{
@@ -39,6 +36,7 @@ const EXECUTION_FUEL_LIMIT: u64 = 20_000_000;
 // every configured module while keeping a live-but-nonterminating job graph bounded independently
 // from bytecode instruction fuel.
 const MODULE_TRANSITION_LIMIT: u32 = MAX_LOADED_MODULES * 16;
+const DRIVER_HOST_WAIT_LIMIT: Duration = Duration::from_secs(60);
 const HEAP_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 const STACK_MAX_FRAMES: u32 = 4_096;
 const STACK_MAX_REGISTERS: u32 = 2 * 1024 * 1024;
@@ -409,7 +407,12 @@ pub(super) fn run_agent_worker(
     if ready.send(Ok(())).is_err() {
         return;
     }
-    let _ = execute_module(&mut isolate, &module);
+    if execute_module(&mut isolate, &module).is_none()
+        && let Ok(root) = ModuleIdentity::try_new("test262-agent-source")
+    {
+        let mut loader = Test262ModuleLoader::for_script(root, &[]);
+        let _ = drive_test262_work(&mut isolate, &mut loader, None);
+    }
 }
 
 fn options(source_mode: SourceMode) -> CompileOptions {
@@ -576,15 +579,24 @@ fn drive_test262_work(
             targets.push_back(import_promise);
         }
         let Some(&target) = targets.front() else {
-            match isolate.drive_jobs_once(quantum) {
+            wake.reset();
+            match isolate.poll_jobs_once(quantum, &mut context) {
                 Ok(true) => continue,
+                Ok(false) if isolate.has_pending_host_jobs() => {
+                    if wake.wait(DRIVER_HOST_WAIT_LIMIT) {
+                        continue;
+                    }
+                    return Some(EngineOutcome::Timeout {
+                        message: "Tachyon host-backed Promise job did not wake the driver".into(),
+                    });
+                }
                 Ok(false) => return None,
                 Err(error) => {
                     return Some(unsupported(format!("module job drain failed: {error:?}")));
                 }
             }
         };
-        wake.0.store(false, Ordering::Relaxed);
+        wake.reset();
         let poll = {
             let mut driver = match isolate.drive_promise(target, quantum) {
                 Ok(driver) => driver,
@@ -607,12 +619,19 @@ fn drive_test262_work(
             core::task::Poll::Ready(Err(error)) => {
                 return Some(unsupported(format!("module driver failed: {error:?}")));
             }
-            core::task::Poll::Pending if !wake.0.load(Ordering::Relaxed) => {
+            core::task::Poll::Pending if wake.is_signaled() => {}
+            core::task::Poll::Pending if isolate.has_pending_host_jobs() => {
+                if !wake.wait(DRIVER_HOST_WAIT_LIMIT) {
+                    return Some(EngineOutcome::Timeout {
+                        message: "Tachyon host-backed Promise did not wake the driver".into(),
+                    });
+                }
+            }
+            core::task::Poll::Pending => {
                 return Some(EngineOutcome::Timeout {
                     message: "Tachyon module driver is quiescent with a pending Promise".into(),
                 });
             }
-            core::task::Poll::Pending => {}
         }
     }
     Some(EngineOutcome::Timeout {
@@ -624,17 +643,48 @@ fn drive_test262_work(
 }
 
 #[derive(Default)]
-struct DriverWake(AtomicBool);
+struct DriverWake {
+    signaled: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl DriverWake {
+    fn reset(&self) {
+        if let Ok(mut signaled) = self.signaled.lock() {
+            *signaled = false;
+        }
+    }
+
+    fn is_signaled(&self) -> bool {
+        self.signaled.lock().is_ok_and(|signaled| *signaled)
+    }
+
+    /// Sleeps without spinning and closes the wake-before-wait race through one predicate lock.
+    fn wait(&self, timeout: Duration) -> bool {
+        let Ok(signaled) = self.signaled.lock() else {
+            return false;
+        };
+        if *signaled {
+            return true;
+        }
+        self.changed
+            .wait_timeout_while(signaled, timeout, |signaled| !*signaled)
+            .is_ok_and(|(signaled, _)| *signaled)
+    }
+}
 
 impl Wake for DriverWake {
     #[inline]
     fn wake(self: Arc<Self>) {
-        self.0.store(true, Ordering::Relaxed);
+        self.wake_by_ref();
     }
 
     #[inline]
     fn wake_by_ref(self: &Arc<Self>) {
-        self.0.store(true, Ordering::Relaxed);
+        if let Ok(mut signaled) = self.signaled.lock() {
+            *signaled = true;
+            self.changed.notify_all();
+        }
     }
 }
 
@@ -978,6 +1028,256 @@ mod tests {
             "#,
             &[],
             false,
+        );
+        test.variant.can_block = true;
+        assert_eq!(execute(&test), EngineOutcome::Completed);
+    }
+
+    #[test]
+    /// Proves a worker-owned async callback can resume after the source entry Fiber completes.
+    fn adapter_agent_async_callback_resumes_without_wait_async() {
+        let mut test = composed(
+            r#"
+            $262.agent.start(`
+              $262.agent.receiveBroadcast(async function () {
+                await 1;
+                $262.agent.report("resumed");
+                $262.agent.leaving();
+              });
+            `);
+            $262.agent.broadcast(new SharedArrayBuffer(4));
+            let report;
+            while ((report = $262.agent.getReport()) === null) {
+              $262.agent.sleep(1);
+            }
+            if (report !== "resumed") {
+              throw new Error("async agent callback did not resume");
+            }
+            "#,
+            &[],
+            false,
+        );
+        test.variant.can_block = true;
+        assert_eq!(execute(&test), EngineOutcome::Completed);
+    }
+
+    #[test]
+    /// Exercises the immediate waitAsync capability cleanup before an async worker suspension.
+    fn adapter_agent_async_callback_resumes_after_immediate_wait_async() {
+        let mut test = composed(
+            r#"
+            $262.agent.start(`
+              $262.agent.receiveBroadcast(async function (sab) {
+                const values = new Int32Array(sab);
+                const result = Atomics.waitAsync(values, 0, 0, 0);
+                if (result.async !== false) {
+                  throw new Error("zero-timeout waitAsync must complete synchronously");
+                }
+                $262.agent.report(await result.value);
+                $262.agent.leaving();
+              });
+            `);
+            $262.agent.broadcast(new SharedArrayBuffer(4));
+            let report;
+            while ((report = $262.agent.getReport()) === null) {
+              $262.agent.sleep(1);
+            }
+            if (report !== "timed-out") {
+              throw new Error("immediate waitAsync result was not reported");
+            }
+            "#,
+            &[],
+            false,
+        );
+        test.variant.can_block = true;
+        assert_eq!(execute(&test), EngineOutcome::Completed);
+    }
+
+    #[test]
+    /// Runs main and worker async chains together across one shared immediate waitAsync result.
+    fn adapter_concurrent_agent_async_chains_survive_immediate_wait_async() {
+        let mut test = composed(
+            r#"
+            $262.agent.start(`
+              $262.agent.receiveBroadcast(async function (sab) {
+                const values = new Int32Array(sab);
+                Atomics.add(values, 1, 1);
+                $262.agent.report(await Atomics.waitAsync(values, 0, 0, 0).value);
+                $262.agent.leaving();
+              });
+            `);
+            const values = new Int32Array(new SharedArrayBuffer(8));
+            (async function () {
+              await $262.agent.broadcast(values.buffer);
+              while (Atomics.load(values, 1) !== 1) {}
+              let report;
+              while ((report = $262.agent.getReport()) === null) {
+                $262.agent.sleep(1);
+              }
+              if (report !== "timed-out") {
+                throw new Error("immediate waitAsync result was not reported");
+              }
+            })().then($DONE, $DONE);
+            "#,
+            &[("doneprintHandle.js", "replaced by the adapter")],
+            true,
+        );
+        test.variant.can_block = true;
+        assert_eq!(execute(&test), EngineOutcome::Completed);
+    }
+
+    #[test]
+    /// Repeatedly transfers one async Fiber through immediate primitive await reactions.
+    fn adapter_async_function_survives_repeated_immediate_awaits() {
+        let test = composed(
+            r#"
+            (async function () {
+              const values = [];
+              values.push(await "a");
+              values.push(await "b");
+              values.push(await "c");
+              values.push(await "d");
+              values.push(await "e");
+              values.push(await "f");
+              if (values.join("") !== "abcdef") {
+                throw new Error("repeated await corrupted the async Fiber");
+              }
+            })().then($DONE, $DONE);
+            "#,
+            &[("doneprintHandle.js", "replaced by the adapter")],
+            true,
+        );
+        assert_eq!(execute(&test), EngineOutcome::Completed);
+    }
+
+    #[test]
+    /// Covers primitive and observable timeout conversion across repeated worker await boundaries.
+    fn adapter_agent_repeated_wait_async_timeout_conversions_are_stable() {
+        let mut test = composed(
+            r#"
+            $262.agent.start(`
+              const valueOf = { valueOf() { return false; } };
+              const toPrimitive = { [Symbol.toPrimitive]() { return false; } };
+              $262.agent.receiveBroadcast(async function (sab) {
+                const values = new Int32Array(sab);
+                $262.agent.report(await Atomics.waitAsync(values, 0, 0, false).value);
+                $262.agent.report(await Atomics.waitAsync(values, 0, 0, valueOf).value);
+                $262.agent.report(await Atomics.waitAsync(values, 0, 0, toPrimitive).value);
+                $262.agent.report(Atomics.waitAsync(values, 0, 0, false).value);
+                $262.agent.report(Atomics.waitAsync(values, 0, 0, valueOf).value);
+                $262.agent.report(Atomics.waitAsync(values, 0, 0, toPrimitive).value);
+                $262.agent.leaving();
+              });
+            `);
+            $262.agent.broadcast(new SharedArrayBuffer(4));
+            for (let index = 0; index < 6; index += 1) {
+              let report;
+              while ((report = $262.agent.getReport()) === null) {
+                $262.agent.sleep(1);
+              }
+              if (report !== "timed-out") {
+                throw new Error("waitAsync timeout conversion result was not stable");
+              }
+            }
+            "#,
+            &[],
+            false,
+        );
+        test.variant.can_block = true;
+        assert_eq!(execute(&test), EngineOutcome::Completed);
+    }
+
+    #[test]
+    /// Reproduces the Test262 Promise polling pressure while a worker prepares its first report.
+    fn adapter_async_report_polling_survives_young_allocation_pressure() {
+        let mut test = composed(
+            r#"
+            const rawGetReport = $262.agent.getReport.bind($262.agent);
+            function schedule(callback, delay) {
+              let pending = Promise.resolve();
+              const end = Date.now() + delay;
+              function check() {
+                if (end - Date.now() > 0) pending.then(check);
+                else callback();
+              }
+              pending.then(check);
+            }
+            function getReportAsync() {
+              return new Promise(function (resolve) {
+                (function loop() {
+                  const report = rawGetReport();
+                  if (report === null) schedule(loop, 1000);
+                  else resolve(report);
+                })();
+              });
+            }
+            $262.agent.start(`
+              const valueOf = { valueOf() { return false; } };
+              const toPrimitive = { [Symbol.toPrimitive]() { return false; } };
+              $262.agent.receiveBroadcast(async function (sab) {
+                const values = new Int32Array(sab);
+                Atomics.add(values, 1, 1);
+                $262.agent.report(await Atomics.waitAsync(values, 0, 0, false).value);
+                $262.agent.report(await Atomics.waitAsync(values, 0, 0, valueOf).value);
+                $262.agent.report(await Atomics.waitAsync(values, 0, 0, toPrimitive).value);
+                $262.agent.leaving();
+              });
+            `);
+            const values = new Int32Array(new SharedArrayBuffer(8));
+            (async function () {
+              await $262.agent.broadcast(values.buffer);
+              while (Atomics.load(values, 1) !== 1) {}
+              for (let index = 0; index < 3; index += 1) {
+                if (await getReportAsync() !== "timed-out") {
+                  throw new Error("async report polling returned the wrong value");
+                }
+              }
+            })().then($DONE, $DONE);
+            "#,
+            &[("doneprintHandle.js", "replaced by the adapter")],
+            true,
+        );
+        test.variant.can_block = true;
+        assert_eq!(execute(&test), EngineOutcome::Completed);
+    }
+
+    #[test]
+    /// Keeps the polling stress identical while exercising BigInt64 shared Atomics separately.
+    fn adapter_bigint_agent_polling_survives_young_allocation_pressure() {
+        let mut test = composed(
+            r#"
+            function getReportAsync() {
+              return new Promise(function (resolve) {
+                (function loop() {
+                  const report = $262.agent.getReport();
+                  if (report === null) Promise.resolve().then(loop);
+                  else resolve(report);
+                })();
+              });
+            }
+            $262.agent.start(`
+              $262.agent.receiveBroadcast(async function (sab) {
+                const values = new BigInt64Array(sab);
+                Atomics.add(values, 1, 1n);
+                $262.agent.report(await Atomics.waitAsync(values, 0, 0n, false).value);
+                $262.agent.report(await Atomics.waitAsync(values, 0, 0n, false).value);
+                $262.agent.report(await Atomics.waitAsync(values, 0, 0n, false).value);
+                $262.agent.leaving();
+              });
+            `);
+            const values = new BigInt64Array(new SharedArrayBuffer(32));
+            $262.agent.broadcast(values.buffer);
+            (async function () {
+              while (Atomics.load(values, 1) !== 1n) {}
+              for (let index = 0; index < 3; index += 1) {
+                if (await getReportAsync() !== "timed-out") {
+                  throw new Error("BigInt waitAsync polling returned the wrong value");
+                }
+              }
+            })().then($DONE, $DONE);
+            "#,
+            &[("doneprintHandle.js", "replaced by the adapter")],
+            true,
         );
         test.variant.can_block = true;
         assert_eq!(execute(&test), EngineOutcome::Completed);

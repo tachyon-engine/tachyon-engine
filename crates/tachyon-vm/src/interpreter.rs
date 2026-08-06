@@ -673,7 +673,7 @@ impl Isolate {
         };
         let frame_realm = self.loaded_code(code)?.realm;
         self.activate_realm_for_frame(frame_realm)?;
-        let (mut cursor, mut registers) = self.execution_cursor(code, function, base)?;
+        let (mut cursor, mut registers) = self.execution_cursor(code, function, pc, base)?;
         #[cfg(feature = "opcode-profile")]
         self.execution_profile.record_batch_cursor_bind();
         for _ in 0..N {
@@ -698,6 +698,11 @@ impl Isolate {
             // SAFETY: `execution_cursor` checked this verified function's complete window, the
             // decoder only returns verifier-approved operands, and no hot operation can resize or
             // expose the register backing before a Slow result invalidates the cursor.
+            debug_assert_eq!(
+                self.fiber.registers.as_ptr().wrapping_add(base as usize),
+                registers.start.as_ptr(),
+                "hot register window outlived a register backing reallocation"
+            );
             let hot_control = unsafe {
                 execute_verified_hot_instruction(&mut registers, instruction, &mut next_pc)
             };
@@ -778,7 +783,7 @@ impl Isolate {
                 self.execution_profile
                     .record_branch(instruction.opcode, pc != fallthrough_pc);
             }
-            (cursor, registers) = match self.execution_cursor(code, function, base) {
+            (cursor, registers) = match self.execution_cursor(code, function, pc, base) {
                 Ok(cursor) => cursor,
                 Err(error) => {
                     #[cfg(feature = "opcode-profile")]
@@ -802,6 +807,7 @@ impl Isolate {
         &mut self,
         code: CodeId,
         function: FunctionId,
+        pc: WordOffset,
         base: u32,
     ) -> Result<(BytecodeCursor, RegisterWindow), ExecutionError> {
         let (bytecode, register_count) = {
@@ -810,10 +816,19 @@ impl Isolate {
                 .module
                 .function(function)
                 .ok_or(ExecutionError::MissingEntryFunction(function))?;
+            let bytecode = function.bytecode();
+            if !bytecode.is_instruction_start(pc) {
+                debug_assert!(
+                    false,
+                    "invalid active PC: code={code:?} function={function:?} pc={pc:?} words={}",
+                    bytecode.bytecode().words().len()
+                );
+                return Err(ExecutionError::DecodeInvariant(pc));
+            }
             (
                 // SAFETY: append-only LoadedCode owns this CompiledModule and its immutable Arc
                 // function backing for the isolate lifetime; the cursor never leaves execution.
-                unsafe { BytecodeCursor::new(function.bytecode()) },
+                unsafe { BytecodeCursor::new(bytecode) },
                 function.layout().register_count,
             )
         };

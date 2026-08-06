@@ -299,7 +299,7 @@ pub(crate) fn numeric_binary_operation(opcode: Opcode, left: Value, right: Value
             numeric_shift(opcode, left, right)
         }
         Opcode::Remainder | Opcode::Exponentiate => numeric_remainder_or_power(opcode, left, right),
-        _ => unreachable!("numeric binary continuation received a non-numeric opcode"),
+        _ => unreachable!("numeric binary continuation received {opcode:?}"),
     }
 }
 

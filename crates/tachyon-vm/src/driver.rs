@@ -61,7 +61,7 @@ impl Future for VmDriver<'_> {
         {
             return Poll::Ready(Ok(outcome));
         }
-        let progress = this.isolate.advance_driver(this.quantum.get())?;
+        let progress = this.isolate.advance_driver(this.quantum.get(), cx)?;
         if let Some(outcome) = this
             .isolate
             .driver_target_outcome(this.target, this.module_root)?
@@ -81,8 +81,18 @@ impl Future for VmDriver<'_> {
 impl Isolate {
     /// Advances at most one isolate-owned scheduler transition for embedding job pumps.
     pub fn drive_jobs_once(&mut self, quantum: NonZeroU32) -> Result<bool, ExecutionError> {
+        let mut context = Context::from_waker(core::task::Waker::noop());
+        self.poll_jobs_once(quantum, &mut context)
+    }
+
+    /// Advances one scheduler transition while registering the embedding executor's waker.
+    pub fn poll_jobs_once(
+        &mut self,
+        quantum: NonZeroU32,
+        context: &mut Context<'_>,
+    ) -> Result<bool, ExecutionError> {
         Ok(!matches!(
-            self.advance_driver(quantum.get())?,
+            self.advance_driver(quantum.get(), context)?,
             DriverProgress::Pending
         ))
     }
@@ -121,7 +131,14 @@ impl Isolate {
     }
 
     /// Advances the active Fiber, a ready module, or one Promise checkpoint transition.
-    fn advance_driver(&mut self, quantum: u32) -> Result<DriverProgress, ExecutionError> {
+    fn advance_driver(
+        &mut self,
+        quantum: u32,
+        context: &mut Context<'_>,
+    ) -> Result<DriverProgress, ExecutionError> {
+        if self.poll_pending_atomics_waits(context)? {
+            return Ok(DriverProgress::Progressed);
+        }
         let budget = ExecutionBudget {
             fuel: u64::MAX,
             quantum,

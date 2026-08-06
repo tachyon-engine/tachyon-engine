@@ -71,6 +71,7 @@ pub struct Isolate {
     pub(crate) driver_active_work: Option<DriverActiveWork>,
     pub(crate) finalization_jobs: finalization::FinalizationJobs,
     pub(crate) promise_jobs: PromiseJobQueue,
+    pub(crate) pending_atomics_waits: Vec<crate::atomics_async::PendingAtomicsWait>,
     pub(crate) agent: AgentState,
     pub(crate) atoms: AtomTable,
     pub(crate) shapes: ShapeTable,
@@ -752,6 +753,9 @@ impl Isolate {
             driver_active_work: None,
             finalization_jobs: finalization::FinalizationJobs::new(),
             promise_jobs: PromiseJobQueue::new(),
+            pending_atomics_waits: Vec::with_capacity(
+                crate::tuning::promises::INITIAL_ASYNC_WAIT_CAPACITY,
+            ),
             agent: AgentState::default(),
             atoms: AtomTable::new(config.atom_table),
             shapes,

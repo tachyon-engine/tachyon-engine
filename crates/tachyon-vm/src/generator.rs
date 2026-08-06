@@ -367,6 +367,14 @@ impl Isolate {
         let mut paused = Some(paused);
         let caller = self.heap.with_running_scope(|scope| {
             let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+            scope
+                .write_trace_barriers(
+                    generator,
+                    paused
+                        .as_mut()
+                        .expect("initialization pause retains Fiber before publication"),
+                )
+                .map_err(ExecutionError::HeapReference)?;
             scope.with_no_gc_scope(|no_gc| {
                 let generator = no_gc
                     .borrow_mut(generator, self.types.generator_object)
@@ -427,6 +435,14 @@ impl Isolate {
         let mut caller = Some(caller);
         let resumed = self.heap.with_running_scope(|scope| {
             let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+            scope
+                .write_trace_barriers(
+                    generator,
+                    caller
+                        .as_mut()
+                        .expect("initialized resume retains caller before publication"),
+                )
+                .map_err(ExecutionError::HeapReference)?;
             scope.with_no_gc_scope(|no_gc| {
                 let generator = no_gc
                     .borrow_mut(generator, self.types.generator_object)
@@ -1032,6 +1048,14 @@ impl Isolate {
         let mut caller = Some(caller);
         let result = self.heap.with_running_scope(|scope| {
             let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+            scope
+                .write_trace_barriers(
+                    generator,
+                    caller
+                        .as_mut()
+                        .expect("generator caller remains owned before publication"),
+                )
+                .map_err(ExecutionError::HeapReference)?;
             scope.with_no_gc_scope(|no_gc| {
                 let generator = no_gc
                     .borrow_mut(generator, self.types.generator_object)
@@ -1196,6 +1220,14 @@ impl Isolate {
         let mut paused = Some(paused);
         let caller = self.heap.with_running_scope(|scope| {
             let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+            scope
+                .write_trace_barriers(
+                    generator,
+                    paused
+                        .as_mut()
+                        .expect("async-generator pause remains owned before publication"),
+                )
+                .map_err(ExecutionError::HeapReference)?;
             scope.with_no_gc_scope(|no_gc| {
                 let generator = no_gc
                     .borrow_mut(generator, self.types.generator_object)
@@ -1425,6 +1457,14 @@ impl Isolate {
         let mut caller = Some(caller);
         let result = self.heap.with_running_scope(|scope| {
             let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+            scope
+                .write_trace_barriers(
+                    generator,
+                    caller
+                        .as_mut()
+                        .expect("generator resume retains caller before publication"),
+                )
+                .map_err(ExecutionError::HeapReference)?;
             scope.with_no_gc_scope(|no_gc| {
                 let generator = no_gc
                     .borrow_mut(generator, self.types.generator_object)
@@ -1533,6 +1573,14 @@ impl Isolate {
         let mut paused = Some(paused);
         let result = self.heap.with_running_scope(|scope| {
             let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+            scope
+                .write_trace_barriers(
+                    generator,
+                    paused
+                        .as_mut()
+                        .expect("generator pause remains owned before publication"),
+                )
+                .map_err(ExecutionError::HeapReference)?;
             scope.with_no_gc_scope(|no_gc| {
                 let generator = no_gc
                     .borrow_mut(generator, self.types.generator_object)

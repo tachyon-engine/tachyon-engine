@@ -411,9 +411,9 @@ pub(crate) enum ConversionConsumer {
     AtomicsIsLockFree,
     AtomicsNotifyIndex,
     AtomicsNotifyCount,
-    AtomicsWaitIndex,
-    AtomicsWaitExpected,
-    AtomicsWaitTimeout,
+    AtomicsWaitIndex(AtomicsFunction),
+    AtomicsWaitExpected(AtomicsFunction),
+    AtomicsWaitTimeout(AtomicsFunction),
     ArraySpliceLength,
     ArraySpliceStart,
     ArraySpliceDeleteCount,
@@ -562,9 +562,9 @@ impl ConversionConsumer {
             | Self::AtomicsIsLockFree
             | Self::AtomicsNotifyIndex
             | Self::AtomicsNotifyCount
-            | Self::AtomicsWaitIndex
-            | Self::AtomicsWaitExpected
-            | Self::AtomicsWaitTimeout
+            | Self::AtomicsWaitIndex(_)
+            | Self::AtomicsWaitExpected(_)
+            | Self::AtomicsWaitTimeout(_)
             | Self::ArraySpliceLength
             | Self::ArraySpliceStart
             | Self::ArraySpliceDeleteCount
@@ -801,6 +801,12 @@ impl ConversionConsumer {
                 | Self::TypedArraySliceEnd
                 | Self::TypedArraySubarrayStart
                 | Self::TypedArraySubarrayEnd
+                | Self::AtomicsIndex(_)
+                | Self::AtomicsValue(_)
+                | Self::AtomicsReplacement(_)
+                | Self::AtomicsWaitIndex(_)
+                | Self::AtomicsWaitExpected(_)
+                | Self::AtomicsWaitTimeout(_)
                 | Self::ArrayCopyWithinLength
                 | Self::ArrayCopyWithinTarget
                 | Self::ArrayCopyWithinStart
@@ -3583,6 +3589,14 @@ pub(crate) struct Frame {
 
 const _: [(); 104] = [(); core::mem::size_of::<Frame>()];
 
+/// Slow-path identity used to detect Fiber replacement even when frame depth stays unchanged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FiberExecutionToken {
+    storage: *const Frame,
+    depth: usize,
+    active: Option<(CodeId, FunctionId, u32)>,
+}
+
 /// Sparse derived-constructor state kept outside the hot `Frame` and ordinary-call path.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ClassActivation {
@@ -3650,7 +3664,27 @@ pub(crate) struct Fiber {
     pub(crate) pending_exception: Option<Value>,
 }
 
+impl Trace for Fiber {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.trace_roots(tracer);
+    }
+}
+
 impl Fiber {
+    /// Snapshots activation identity without rooting, allocating, or exposing frame references.
+    #[inline(always)]
+    pub(crate) fn execution_token(&self) -> FiberExecutionToken {
+        FiberExecutionToken {
+            storage: self.frames.as_ptr(),
+            depth: self.frames.len(),
+            active: self
+                .frames
+                .last()
+                .map(|frame| (frame.code, frame.function, frame.base)),
+        }
+    }
+
     /// Traces every mutable reference reachable from an active, yielded, or suspended fiber.
     ///
     /// Frame control indices are validated when handlers are installed. They do not themselves
@@ -3679,14 +3713,25 @@ impl Fiber {
         debug_assert!(self.eval_var_environments.iter().all(|environment| {
             environment.frame_depth != 0 && environment.frame_depth as usize <= self.frames.len()
         }));
-        for frame in &mut self.frames {
+        for frame_index in 0..self.frames.len() {
+            let caller_base = frame_index
+                .checked_sub(1)
+                .and_then(|caller_index| self.frames.get(caller_index))
+                .map(|caller| caller.base);
+            let frame = &mut self.frames[frame_index];
             frame.environment.trace(tracer);
             frame.this_value.trace(tracer);
             frame.new_target.trace(tracer);
             frame.receiver_or_home_object.trace(tracer);
             frame.argument_prefix.trace(tracer);
-            if let Some(return_register) = frame.return_register {
-                debug_assert!((return_register.index() as usize) < self.registers.len());
+            if let Some(return_register) = frame.return_register
+                && !frame.return_continuation
+            {
+                debug_assert!(
+                    caller_base
+                        .and_then(|base| base.checked_add(return_register.index()))
+                        .is_some_and(|index| (index as usize) < self.registers.len())
+                );
             }
             debug_assert!(frame.argument_prefix_count <= frame.argument_count);
             debug_assert!(

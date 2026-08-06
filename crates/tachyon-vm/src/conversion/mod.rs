@@ -749,9 +749,9 @@ impl Isolate {
                     }
                     if matches!(
                         continuation.consumer,
-                        ConversionConsumer::AtomicsWaitIndex
-                            | ConversionConsumer::AtomicsWaitExpected
-                            | ConversionConsumer::AtomicsWaitTimeout
+                        ConversionConsumer::AtomicsWaitIndex(_)
+                            | ConversionConsumer::AtomicsWaitExpected(_)
+                            | ConversionConsumer::AtomicsWaitTimeout(_)
                     ) {
                         let state = self.native_call_state_reference(continuation.receiver)?;
                         return self.resume_atomics_wait_conversion(
@@ -1799,9 +1799,9 @@ impl Isolate {
                 | ConversionConsumer::AtomicsIsLockFree
                 | ConversionConsumer::AtomicsNotifyIndex
                 | ConversionConsumer::AtomicsNotifyCount
-                | ConversionConsumer::AtomicsWaitIndex
-                | ConversionConsumer::AtomicsWaitExpected
-                | ConversionConsumer::AtomicsWaitTimeout => {
+                | ConversionConsumer::AtomicsWaitIndex(_)
+                | ConversionConsumer::AtomicsWaitExpected(_)
+                | ConversionConsumer::AtomicsWaitTimeout(_) => {
                     unreachable!("Atomics conversion resumes inside its state machine")
                 }
                 ConversionConsumer::TypedArrayIncludesFromIndex => {

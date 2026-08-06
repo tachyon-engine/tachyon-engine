@@ -5,8 +5,8 @@ use crate::{
     GcTypeId, GrayQueueStats, HeapReferenceError, KeptObjectStats, LargeAllocationError,
     MAX_LOGICAL_OBJECT_COUNT, MAX_LOGICAL_SPANS, MarkError, MarkStats, MinorSweepStats, RawHeapRef,
     SPAN_SIZE_BYTES, SmallAllocationError, SpanId, SpanTable, SpanTableError, SweepError,
-    SweepStats, SweepWorklistStats, TemporaryRootStats, Trace, TypeRegistry, WeakOwnerStats,
-    YoungMarkStats,
+    SweepStats, SweepWorklistStats, TemporaryRootStats, Trace, Tracer, TypeRegistry,
+    WeakOwnerStats, YoungMarkStats,
     eden::EdenPool,
     finalization::PendingFinalizations,
     gray::GrayQueue,
@@ -22,6 +22,64 @@ use crate::{
 };
 
 mod allocation;
+
+/// Allocation-free visitor that publishes every traced edge for one already-mutated owner.
+struct TraceBarrierPublisher<'a> {
+    table: &'a mut SpanTable,
+    source: RawHeapRef,
+    remembered: bool,
+    error: Option<HeapReferenceError>,
+}
+
+impl TraceBarrierPublisher<'_> {
+    #[inline(always)]
+    fn publish(&mut self, target: RawHeapRef) {
+        if self.error.is_some() {
+            return;
+        }
+        match self.table.remember_old_to_young(self.source, target) {
+            Ok(remembered) => self.remembered |= remembered,
+            Err(error) => self.error = Some(error),
+        }
+    }
+}
+
+impl Tracer for TraceBarrierPublisher<'_> {
+    #[inline(always)]
+    fn trace_value(&mut self, value: &mut tachyon_value::Value) {
+        if let Some(target) = value.as_heap_ref() {
+            self.publish(target);
+        }
+    }
+
+    #[inline(always)]
+    fn trace_raw_heap_ref(&mut self, reference: &mut RawHeapRef) {
+        self.publish(*reference);
+    }
+
+    #[inline(always)]
+    fn trace_weak_raw_heap_ref(&mut self, reference: &mut Option<RawHeapRef>) {
+        if let Some(target) = *reference {
+            self.publish(target);
+        }
+    }
+
+    #[inline(always)]
+    fn trace_ephemeron(&mut self, key: &mut Option<RawHeapRef>, value: &mut tachyon_value::Value) {
+        self.trace_weak_raw_heap_ref(key);
+        self.trace_value(value);
+    }
+
+    #[inline(always)]
+    fn trace_finalization(
+        &mut self,
+        target: &mut Option<RawHeapRef>,
+        held_value: &mut tachyon_value::Value,
+    ) {
+        self.trace_weak_raw_heap_ref(target);
+        self.trace_value(held_value);
+    }
+}
 
 /// Whether an object enters the young bump path or is allocated directly in old space.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -330,6 +388,29 @@ impl Heap {
         target: RawHeapRef,
     ) -> Result<bool, HeapReferenceError> {
         self.table.remember_old_to_young(source, target)
+    }
+
+    /// Publishes every edge in one traced aggregate stored into a managed owner.
+    ///
+    /// This is intended for sparse state transfers such as a VM Fiber, where duplicating the
+    /// aggregate's exact tracing contract at each mutation site would be error-prone. The visitor
+    /// performs no allocation and is only needed after the aggregate has been logically stored.
+    pub fn write_trace_barriers(
+        &mut self,
+        source: RawHeapRef,
+        targets: &mut dyn Trace,
+    ) -> Result<bool, HeapReferenceError> {
+        let mut publisher = TraceBarrierPublisher {
+            table: &mut self.table,
+            source,
+            remembered: false,
+            error: None,
+        };
+        targets.trace(&mut publisher);
+        match publisher.error {
+            Some(error) => Err(error),
+            None => Ok(publisher.remembered),
+        }
     }
 
     /// Creates an unforgeable local-handle lifetime and always rolls back its root checkpoint.

@@ -51,8 +51,8 @@ impl Isolate {
         if function == AtomicsFunction::Notify {
             return self.begin_atomics_notify(site);
         }
-        if function == AtomicsFunction::Wait {
-            return self.begin_atomics_wait(site);
+        if matches!(function, AtomicsFunction::Wait | AtomicsFunction::WaitAsync) {
+            return self.begin_atomics_wait(site, function);
         }
         if function == AtomicsFunction::Pause {
             return self.write(
@@ -369,7 +369,15 @@ impl Isolate {
     }
 
     /// Validates shared waitable storage before converting index, expected value, and timeout.
-    fn begin_atomics_wait(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+    fn begin_atomics_wait(
+        &mut self,
+        site: &CallSite,
+        function: AtomicsFunction,
+    ) -> Result<(), ExecutionError> {
+        debug_assert!(matches!(
+            function,
+            AtomicsFunction::Wait | AtomicsFunction::WaitAsync
+        ));
         let undefined = Value::from_immediate(Immediate::Undefined);
         let receiver = self.call_argument(site, 0)?.unwrap_or(undefined);
         let snapshot = self.validate_waitable_typed_array(receiver)?;
@@ -397,7 +405,14 @@ impl Isolate {
             }
             let expected = self.convert_atomics_wait_expected(snapshot.kind, expected)?;
             let timeout = self.convert_atomics_wait_timeout(timeout)?;
-            return self.finish_atomics_wait(continuation_site, receiver, index, expected, timeout);
+            return self.finish_atomics_wait(
+                continuation_site,
+                function,
+                receiver,
+                index,
+                expected,
+                timeout,
+            );
         }
         let state = self.allocate_atomics_state(NativeCallState {
             values: [
@@ -417,7 +432,7 @@ impl Isolate {
         self.convert_atomics_value(
             continuation_site,
             state,
-            ConversionConsumer::AtomicsWaitIndex,
+            ConversionConsumer::AtomicsWaitIndex(function),
             index,
         )
     }
@@ -432,7 +447,7 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let pending = self.native_call_state_snapshot(state)?;
         match consumer {
-            ConversionConsumer::AtomicsWaitIndex => {
+            ConversionConsumer::AtomicsWaitIndex(function) => {
                 let index = self.ecma_to_index(value)?;
                 if index >= atomic_usize(pending.values[ATOMICS_INITIAL_LENGTH])? {
                     return Err(ExecutionError::InvalidArrayLength);
@@ -441,11 +456,11 @@ impl Isolate {
                 self.convert_atomics_value(
                     site,
                     state,
-                    ConversionConsumer::AtomicsWaitExpected,
+                    ConversionConsumer::AtomicsWaitExpected(function),
                     pending.values[ATOMICS_VALUE],
                 )
             }
-            ConversionConsumer::AtomicsWaitExpected => {
+            ConversionConsumer::AtomicsWaitExpected(function) => {
                 let kind = self
                     .typed_array_snapshot(pending.values[ATOMICS_RECEIVER])?
                     .kind;
@@ -454,14 +469,14 @@ impl Isolate {
                 self.convert_atomics_value(
                     site,
                     state,
-                    ConversionConsumer::AtomicsWaitTimeout,
+                    ConversionConsumer::AtomicsWaitTimeout(function),
                     pending.values[ATOMICS_REPLACEMENT],
                 )
             }
-            ConversionConsumer::AtomicsWaitTimeout => {
+            ConversionConsumer::AtomicsWaitTimeout(function) => {
                 let timeout = self.convert_atomics_wait_timeout(value)?;
                 self.set_atomics_value(state, ATOMICS_REPLACEMENT, Value::from_f64(timeout))?;
-                self.finish_atomics_wait_state(site, state)
+                self.finish_atomics_wait_state(site, state, function)
             }
             _ => Err(ExecutionError::MissingNativeContinuation),
         }
@@ -472,10 +487,12 @@ impl Isolate {
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
+        function: AtomicsFunction,
     ) -> Result<(), ExecutionError> {
         let pending = self.native_call_state_snapshot(state)?;
         self.finish_atomics_wait(
             site,
+            function,
             pending.values[ATOMICS_RECEIVER],
             atomic_usize(pending.values[ATOMICS_INDEX])?,
             pending.values[ATOMICS_VALUE],
@@ -488,6 +505,7 @@ impl Isolate {
     fn finish_atomics_wait(
         &mut self,
         site: NativeContinuationSite,
+        function: AtomicsFunction,
         receiver: Value,
         index: usize,
         expected: Value,
@@ -515,7 +533,7 @@ impl Isolate {
             byte_offset,
         );
         let timeout = atomics_wait_timeout(timeout_ms);
-        if !self.host_providers.agent_can_suspend() {
+        if function == AtomicsFunction::Wait && !self.host_providers.agent_can_suspend() {
             return Err(ExecutionError::AtomicsWaitCannotSuspend);
         }
         let mut condition = || {
@@ -532,6 +550,9 @@ impl Isolate {
                 .ok_or(HostProviderError::Failure(1))?;
             Ok(atomic_read_bits(bytes) == expected)
         };
+        if function == AtomicsFunction::WaitAsync {
+            return self.finish_atomics_wait_async(site, location, timeout, &mut condition);
+        }
         let result = if let Some(provider) = self.host_providers.atomics_waiter_mut() {
             provider
                 .wait(location, timeout, &mut condition)
@@ -543,14 +564,74 @@ impl Isolate {
         } else {
             return Err(ExecutionError::MissingAtomicsWaiterProvider);
         };
-        let text = match result {
-            AtomicsWaitResult::Ok => b"ok".as_slice(),
-            AtomicsWaitResult::NotEqual => b"not-equal".as_slice(),
-            AtomicsWaitResult::TimedOut => b"timed-out".as_slice(),
-        };
-        let string = JsString::try_from_latin1(text).map_err(ExecutionError::PropertyKeyString)?;
-        let result = self.allocate_runtime_string(string)?;
+        let result = self.allocate_atomics_wait_result(result)?;
         self.write(site.caller_base, site.destination, result)
+    }
+
+    /// Creates the normative result object and transfers a pending wait into the driver registry.
+    fn finish_atomics_wait_async(
+        &mut self,
+        site: NativeContinuationSite,
+        location: AtomicsWaitLocation,
+        timeout: Option<core::time::Duration>,
+        condition: &mut dyn FnMut() -> Result<bool, HostProviderError>,
+    ) -> Result<(), ExecutionError> {
+        self.reserve_pending_atomics_wait()?;
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let promise = self.create_promise(PromiseState::Pending, undefined)?;
+        let root = self.persist_atomics_wait_promise(promise)?;
+        let prepared = (|| {
+            let result = self.create_ordinary_object()?;
+            self.write(site.caller_base, site.destination, result)?;
+            let async_atom = self.intern_intrinsic_name(b"async")?;
+            let value_atom = self.intern_intrinsic_name(b"value")?;
+            self.set_own_data_property(result, async_atom, boolean_value(true))?;
+            self.set_own_data_property(result, value_atom, promise)?;
+            Ok::<_, ExecutionError>((result, async_atom, value_atom))
+        })();
+        let (result, async_atom, value_atom) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.release_atomics_wait_promise(root)?;
+                return Err(error);
+            }
+        };
+        let start = if let Some(provider) = self.host_providers.atomics_waiter_mut() {
+            provider
+                .wait_async(location, timeout, condition)
+                .map_err(ExecutionError::AtomicsWaiterProvider)
+        } else {
+            match condition().map_err(ExecutionError::AtomicsWaiterProvider) {
+                Ok(false) => Ok(AtomicsAsyncWaitStart::Immediate(
+                    AtomicsWaitResult::NotEqual,
+                )),
+                Ok(true) if timeout == Some(core::time::Duration::ZERO) => Ok(
+                    AtomicsAsyncWaitStart::Immediate(AtomicsWaitResult::TimedOut),
+                ),
+                Ok(true) => Err(ExecutionError::MissingAtomicsWaiterProvider),
+                Err(error) => Err(error),
+            }
+        };
+        match start {
+            Ok(AtomicsAsyncWaitStart::Pending(operation)) => {
+                self.register_pending_atomics_wait(root, operation);
+                Ok(())
+            }
+            Ok(AtomicsAsyncWaitStart::Immediate(outcome)) => {
+                let value = self.allocate_atomics_wait_result(outcome);
+                let update = value.and_then(|value| {
+                    self.set_own_data_property(result, async_atom, boolean_value(false))?;
+                    self.set_own_data_property(result, value_atom, value)
+                });
+                let release = self.release_atomics_wait_promise(root);
+                update?;
+                release
+            }
+            Err(error) => {
+                self.release_atomics_wait_promise(root)?;
+                Err(error)
+            }
+        }
     }
 
     /// Converts the wait comparison operand without narrowing BigInt through a Number.
@@ -735,7 +816,10 @@ impl Isolate {
                 }
                 AtomicsFunction::Sub => old.wrapping_sub(operand),
                 AtomicsFunction::Xor => old ^ operand,
-                AtomicsFunction::IsLockFree | AtomicsFunction::Load | AtomicsFunction::Wait => {
+                AtomicsFunction::IsLockFree
+                | AtomicsFunction::Load
+                | AtomicsFunction::Wait
+                | AtomicsFunction::WaitAsync => {
                     return Err(ExecutionError::MissingNativeContinuation);
                 }
             } & mask;
@@ -886,9 +970,9 @@ impl Isolate {
         }
         if matches!(
             consumer,
-            ConversionConsumer::AtomicsWaitIndex
-                | ConversionConsumer::AtomicsWaitExpected
-                | ConversionConsumer::AtomicsWaitTimeout
+            ConversionConsumer::AtomicsWaitIndex(_)
+                | ConversionConsumer::AtomicsWaitExpected(_)
+                | ConversionConsumer::AtomicsWaitTimeout(_)
         ) {
             return self.resume_atomics_wait_conversion(site, state, consumer, value);
         }

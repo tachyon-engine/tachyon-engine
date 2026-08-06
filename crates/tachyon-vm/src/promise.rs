@@ -373,7 +373,7 @@ impl Isolate {
                 Value::from_heap_ref(arguments.raw()),
             ))
             .map_err(Isolate::completion_stack_error)?;
-        let frame_depth = self.fiber.frames.len();
+        let fiber_token = self.fiber.execution_token();
         if let Err(error) = self.call(CallSite {
             caller_base: site.caller_base,
             destination: site.destination,
@@ -397,7 +397,7 @@ impl Isolate {
             }
             return Err(error);
         }
-        if self.fiber.frames.len() != frame_depth {
+        if self.fiber.execution_token() != fiber_token {
             let frame = self
                 .fiber
                 .frames
@@ -776,7 +776,7 @@ impl Isolate {
         )?;
         let then_atom = self.intern_intrinsic_name(b"then")?;
         let completion_depth = self.fiber.completions.len();
-        let frame_depth = self.fiber.frames.len();
+        let fiber_token = self.fiber.execution_token();
         self.fiber
             .completions
             .push_native(NativeContinuation::promise_catch(
@@ -798,7 +798,7 @@ impl Isolate {
             }
             return Err(error);
         }
-        if self.fiber.frames.len() != frame_depth
+        if self.fiber.execution_token() != fiber_token
             || self.fiber.completions.len() <= completion_depth
         {
             return Ok(());
@@ -1107,7 +1107,7 @@ impl Isolate {
         key: PropertyKey,
     ) -> Result<(), ExecutionError> {
         let completion_depth = self.fiber.completions.len();
-        let frame_depth = self.fiber.frames.len();
+        let fiber_token = self.fiber.execution_token();
         self.fiber
             .completions
             .push_native(NativeContinuation::promise_finally_method(
@@ -1124,7 +1124,7 @@ impl Isolate {
             }
             return Err(error);
         }
-        if self.fiber.frames.len() != frame_depth
+        if self.fiber.execution_token() != fiber_token
             || self.fiber.completions.len() <= completion_depth
         {
             return Ok(());
@@ -1572,7 +1572,7 @@ impl Isolate {
             .completions
             .push_native(NativeContinuation::promise_reaction(site, capability))
             .map_err(Isolate::completion_stack_error)?;
-        let frame_depth = self.fiber.frames.len();
+        let fiber_token = self.fiber.execution_token();
         if let Err(error) = self.call(CallSite {
             caller_base: site.caller_base,
             destination: 0,
@@ -1599,7 +1599,7 @@ impl Isolate {
             }
             return Err(error);
         }
-        if self.fiber.frames.len() != frame_depth {
+        if self.fiber.execution_token() != fiber_token {
             let frame = self
                 .fiber
                 .frames
@@ -1653,7 +1653,7 @@ impl Isolate {
             .completions
             .push_native(continuation)
             .map_err(Isolate::completion_stack_error)?;
-        let frame_depth = self.fiber.frames.len();
+        let fiber_token = self.fiber.execution_token();
         if let Err(error) = self.call(CallSite {
             caller_base: site.caller_base,
             destination: 0,
@@ -1678,7 +1678,7 @@ impl Isolate {
             self.reject_promise_thenable(continuation, reason)?;
             return Ok(false);
         }
-        if self.fiber.frames.len() != frame_depth {
+        if self.fiber.execution_token() != fiber_token {
             let frame = self
                 .fiber
                 .frames

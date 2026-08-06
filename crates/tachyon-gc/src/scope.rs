@@ -208,6 +208,17 @@ impl<'heap, 'scope> RunningScope<'heap, 'scope> {
         self.heap.write_barrier(source.as_gc_ref().raw(), target)
     }
 
+    /// Publishes every direct edge of a traced aggregate stored into one managed owner.
+    #[inline]
+    pub fn write_trace_barriers<S: ?Sized>(
+        &mut self,
+        source: Local<'scope, S>,
+        targets: &mut dyn Trace,
+    ) -> Result<bool, HeapReferenceError> {
+        self.heap
+            .write_trace_barriers(source.as_gc_ref().raw(), targets)
+    }
+
     /// Implements AddToKeptObjects for a successfully dereferenced weak target.
     pub fn keep_alive<T: ?Sized>(
         &mut self,

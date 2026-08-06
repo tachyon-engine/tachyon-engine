@@ -1,6 +1,11 @@
 //! Host-owned capabilities used by ECMAScript builtins without platform access in engine core.
 
-use core::{fmt, num::NonZeroUsize, time::Duration};
+use core::{
+    fmt,
+    num::NonZeroUsize,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use crate::SharedArrayBufferHandle;
 
@@ -55,6 +60,24 @@ pub enum AtomicsWaitResult {
     TimedOut,
 }
 
+/// One host-owned asynchronous wait operation polled only by its originating isolate.
+///
+/// Implementations may retain synchronization handles and wakers, but must never retain
+/// isolate-local `Value` or `GcRef` data. Dropping the operation must unregister any waiter that
+/// has not already completed.
+pub trait AtomicsAsyncWait: Send {
+    fn poll(
+        &mut self,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<AtomicsWaitResult, HostProviderError>>;
+}
+
+/// Result of atomically comparing and optionally publishing one asynchronous waiter.
+pub enum AtomicsAsyncWaitStart {
+    Immediate(AtomicsWaitResult),
+    Pending(Box<dyn AtomicsAsyncWait>),
+}
+
 /// Engine-neutral scalar accompanying one Test262-style SharedArrayBuffer broadcast.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentBroadcastValue {
@@ -88,6 +111,20 @@ pub trait AtomicsWaiterProvider: Send {
         timeout: Option<Duration>,
         condition: &mut dyn FnMut() -> Result<bool, HostProviderError>,
     ) -> Result<AtomicsWaitResult, HostProviderError>;
+
+    /// Compares and publishes without blocking the isolate thread.
+    ///
+    /// The provider must serialize the supplied condition and waiter publication against
+    /// `notify` exactly as for synchronous `wait`. The default keeps existing embedders source
+    /// compatible while making missing asynchronous support explicit.
+    fn wait_async(
+        &mut self,
+        _location: AtomicsWaitLocation,
+        _timeout: Option<Duration>,
+        _condition: &mut dyn FnMut() -> Result<bool, HostProviderError>,
+    ) -> Result<AtomicsAsyncWaitStart, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
 }
 
 /// Host-owned lifecycle and coordination capability for one ECMAScript agent cluster.

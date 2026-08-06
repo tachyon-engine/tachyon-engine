@@ -3,13 +3,14 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Condvar, Mutex, mpsc},
+    task::{Context, Poll, Waker},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
 use tachyon_vm::{
-    AgentBroadcast, AgentHostProvider, AtomicsWaitLocation, AtomicsWaitResult,
-    AtomicsWaiterProvider, HostProviderError,
+    AgentBroadcast, AgentHostProvider, AtomicsAsyncWait, AtomicsAsyncWaitStart,
+    AtomicsWaitLocation, AtomicsWaitResult, AtomicsWaiterProvider, HostProviderError,
 };
 
 use crate::tachyon::run_agent_worker;
@@ -20,6 +21,7 @@ const MAX_AGENT_REPORTS: usize = 4_096;
 const INITIAL_AGENT_WORKER_CAPACITY: usize = 8;
 const INITIAL_AGENT_REPORT_CAPACITY: usize = 16;
 const INITIAL_AGENT_LOCATION_CAPACITY: usize = 8;
+const INITIAL_ASYNC_DEADLINE_CAPACITY: usize = 4;
 
 /// Main-request owner that guarantees cancellation and joining on every return path.
 pub(super) struct AgentController {
@@ -55,8 +57,41 @@ struct Broadcast {
     recipients: HashSet<u64>,
 }
 
+struct WaiterRegistration {
+    id: u64,
+    completion: Option<Arc<AsyncWaitCompletion>>,
+}
+
+#[derive(Default)]
+struct AsyncWaitCompletion {
+    state: Mutex<AsyncWaitCompletionState>,
+}
+
+#[derive(Default)]
+struct AsyncWaitCompletionState {
+    outcome: Option<Result<AtomicsWaitResult, HostProviderError>>,
+    waker: Option<Waker>,
+}
+
+impl AsyncWaitCompletion {
+    /// Publishes exactly one terminal result and wakes the isolate executor outside cluster locks.
+    fn complete(&self, outcome: Result<AtomicsWaitResult, HostProviderError>) {
+        let waker = self.state.lock().ok().and_then(|mut state| {
+            if state.outcome.is_some() {
+                return None;
+            }
+            state.outcome = Some(outcome);
+            state.waker.take()
+        });
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
 struct Test262AgentState {
-    waiter_queues: HashMap<AtomicsWaitLocation, VecDeque<u64>>,
+    waiter_queues: HashMap<AtomicsWaitLocation, VecDeque<WaiterRegistration>>,
+    async_deadlines: HashMap<u64, (Instant, AtomicsWaitLocation)>,
     next_waiter: u64,
     next_worker: u64,
     ready_workers: HashSet<u64>,
@@ -69,6 +104,7 @@ impl Test262AgentState {
     fn new() -> Self {
         Self {
             waiter_queues: HashMap::with_capacity(INITIAL_AGENT_LOCATION_CAPACITY),
+            async_deadlines: HashMap::with_capacity(INITIAL_ASYNC_DEADLINE_CAPACITY),
             next_waiter: 0,
             next_worker: 0,
             ready_workers: HashSet::with_capacity(INITIAL_AGENT_WORKER_CAPACITY),
@@ -84,6 +120,7 @@ pub(super) struct Test262AgentCluster {
     state: Mutex<Test262AgentState>,
     changed: Condvar,
     workers: Mutex<Vec<JoinHandle<()>>>,
+    timer_worker: Mutex<Option<JoinHandle<()>>>,
     started: Instant,
 }
 
@@ -93,6 +130,7 @@ impl Test262AgentCluster {
             state: Mutex::new(Test262AgentState::new()),
             changed: Condvar::new(),
             workers: Mutex::new(Vec::with_capacity(INITIAL_AGENT_WORKER_CAPACITY)),
+            timer_worker: Mutex::new(None),
             started: Instant::now(),
         }
     }
@@ -155,13 +193,84 @@ impl Test262AgentCluster {
         }
     }
 
-    fn cancel(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.cancelled = true;
-            state.waiter_queues.clear();
-            state.broadcast = None;
-            self.changed.notify_all();
+    /// Starts one request-scoped timer coordinator only when the first finite async wait appears.
+    fn ensure_timer_worker(self: &Arc<Self>) -> Result<(), HostProviderError> {
+        let mut timer = self.timer_worker.lock().map_err(provider_failure)?;
+        if timer.is_some() {
+            return Ok(());
         }
+        let cluster = Arc::clone(self);
+        let handle = thread::Builder::new()
+            .name("test262-atomics-timer".into())
+            .spawn(move || cluster.run_timer_worker())
+            .map_err(|_| HostProviderError::Failure(10))?;
+        *timer = Some(handle);
+        Ok(())
+    }
+
+    /// Waits for the nearest deadline, removing exactly the registration that wins the race.
+    fn run_timer_worker(self: Arc<Self>) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        loop {
+            if state.cancelled {
+                return;
+            }
+            let next = state
+                .async_deadlines
+                .iter()
+                .min_by_key(|(_, (deadline, _))| *deadline)
+                .map(|(waiter, (deadline, location))| (*waiter, *deadline, *location));
+            let Some((waiter, deadline, location)) = next else {
+                let Ok(next) = self.changed.wait(state) else {
+                    return;
+                };
+                state = next;
+                continue;
+            };
+            let now = Instant::now();
+            if let Some(remaining) = deadline.checked_duration_since(now) {
+                let Ok((next, _)) = self.changed.wait_timeout(state, remaining) else {
+                    return;
+                };
+                state = next;
+                continue;
+            }
+            state.async_deadlines.remove(&waiter);
+            let completion = remove_waiter(&mut state, location, waiter)
+                .and_then(|registration| registration.completion);
+            drop(state);
+            if let Some(completion) = completion {
+                completion.complete(Ok(AtomicsWaitResult::TimedOut));
+            }
+            self.changed.notify_all();
+            let Ok(next) = self.state.lock() else {
+                return;
+            };
+            state = next;
+        }
+    }
+
+    fn cancel(&self) {
+        let completions = if let Ok(mut state) = self.state.lock() {
+            state.cancelled = true;
+            state.async_deadlines.clear();
+            let completions = state
+                .waiter_queues
+                .drain()
+                .flat_map(|(_, queue)| queue)
+                .filter_map(|registration| registration.completion)
+                .collect::<Vec<_>>();
+            state.broadcast = None;
+            completions
+        } else {
+            Vec::new()
+        };
+        for completion in completions {
+            completion.complete(Err(HostProviderError::Unavailable));
+        }
+        self.changed.notify_all();
     }
 
     /// Wakes every blocking host operation, then joins workers without holding cluster locks.
@@ -175,6 +284,20 @@ impl Test262AgentCluster {
         for handle in handles {
             let _ = handle.join();
         }
+        if let Ok(mut timer) = self.timer_worker.lock()
+            && let Some(handle) = timer.take()
+        {
+            let _ = handle.join();
+        }
+    }
+
+    /// Removes a dropped async handle from both the waiter FIFO and deadline registry.
+    fn cancel_async_wait(&self, location: AtomicsWaitLocation, waiter: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            state.async_deadlines.remove(&waiter);
+            let _ = remove_waiter(&mut state, location, waiter);
+        }
+        self.changed.notify_all();
     }
 }
 
@@ -192,15 +315,28 @@ impl AtomicsWaiterProvider for Test262AtomicsWaiter {
     ) -> Result<u64, HostProviderError> {
         let mut state = self.cluster.state.lock().map_err(provider_failure)?;
         let mut notified = 0_u64;
+        let mut removed = Vec::new();
         if let Some(queue) = state.waiter_queues.get_mut(&location) {
-            while notified < count && queue.pop_front().is_some() {
+            while notified < count {
+                let Some(registration) = queue.pop_front() else {
+                    break;
+                };
+                removed.push(registration);
                 notified += 1;
             }
             if queue.is_empty() {
                 state.waiter_queues.remove(&location);
             }
         }
+        for registration in &removed {
+            state.async_deadlines.remove(&registration.id);
+        }
         drop(state);
+        for registration in removed {
+            if let Some(completion) = registration.completion {
+                completion.complete(Ok(AtomicsWaitResult::Ok));
+            }
+        }
         if notified != 0 {
             self.cluster.changed.notify_all();
         }
@@ -225,13 +361,112 @@ impl AtomicsWaiterProvider for Test262AtomicsWaiter {
             return Ok(AtomicsWaitResult::TimedOut);
         }
         let waiter = state.next_waiter;
-        state.next_waiter = state.next_waiter.wrapping_add(1);
+        state.next_waiter = state
+            .next_waiter
+            .checked_add(1)
+            .ok_or(HostProviderError::Failure(11))?;
         state
             .waiter_queues
             .entry(location)
             .or_default()
-            .push_back(waiter);
+            .push_back(WaiterRegistration {
+                id: waiter,
+                completion: None,
+            });
         self.wait_loop(state, location, waiter, timeout)
+    }
+
+    /// Publishes an engine-neutral handle while preserving compare/enqueue atomicity.
+    fn wait_async(
+        &mut self,
+        location: AtomicsWaitLocation,
+        timeout: Option<Duration>,
+        condition: &mut dyn FnMut() -> Result<bool, HostProviderError>,
+    ) -> Result<AtomicsAsyncWaitStart, HostProviderError> {
+        if timeout.is_some_and(|timeout| !timeout.is_zero()) {
+            self.cluster.ensure_timer_worker()?;
+        }
+        let mut state = self.cluster.state.lock().map_err(provider_failure)?;
+        if state.cancelled {
+            return Err(HostProviderError::Unavailable);
+        }
+        if !condition()? {
+            return Ok(AtomicsAsyncWaitStart::Immediate(
+                AtomicsWaitResult::NotEqual,
+            ));
+        }
+        if timeout == Some(Duration::ZERO) {
+            return Ok(AtomicsAsyncWaitStart::Immediate(
+                AtomicsWaitResult::TimedOut,
+            ));
+        }
+        let waiter = state.next_waiter;
+        state.next_waiter = state
+            .next_waiter
+            .checked_add(1)
+            .ok_or(HostProviderError::Failure(11))?;
+        let completion = Arc::new(AsyncWaitCompletion::default());
+        let deadline = timeout
+            .map(|timeout| {
+                Instant::now()
+                    .checked_add(timeout)
+                    .ok_or(HostProviderError::Failure(12))
+            })
+            .transpose()?;
+        state
+            .waiter_queues
+            .entry(location)
+            .or_default()
+            .push_back(WaiterRegistration {
+                id: waiter,
+                completion: Some(Arc::clone(&completion)),
+            });
+        if let Some(deadline) = deadline {
+            state.async_deadlines.insert(waiter, (deadline, location));
+        }
+        drop(state);
+        self.cluster.changed.notify_all();
+        Ok(AtomicsAsyncWaitStart::Pending(Box::new(Test262AsyncWait {
+            cluster: Arc::clone(&self.cluster),
+            location,
+            waiter,
+            completion,
+        })))
+    }
+}
+
+struct Test262AsyncWait {
+    cluster: Arc<Test262AgentCluster>,
+    location: AtomicsWaitLocation,
+    waiter: u64,
+    completion: Arc<AsyncWaitCompletion>,
+}
+
+impl AtomicsAsyncWait for Test262AsyncWait {
+    fn poll(
+        &mut self,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<AtomicsWaitResult, HostProviderError>> {
+        let Ok(mut state) = self.completion.state.lock() else {
+            return Poll::Ready(Err(HostProviderError::Failure(1)));
+        };
+        if let Some(outcome) = state.outcome.take() {
+            return Poll::Ready(outcome);
+        }
+        let replace = state
+            .waker
+            .as_ref()
+            .is_none_or(|registered| !registered.will_wake(context.waker()));
+        if replace {
+            state.waker = Some(context.waker().clone());
+        }
+        Poll::Pending
+    }
+}
+
+impl Drop for Test262AsyncWait {
+    fn drop(&mut self) {
+        self.cluster.cancel_async_wait(self.location, self.waiter);
     }
 }
 
@@ -247,7 +482,7 @@ impl Test262AtomicsWaiter {
         let started = Instant::now();
         loop {
             if state.cancelled {
-                remove_waiter(&mut state, location, waiter);
+                let _ = remove_waiter(&mut state, location, waiter);
                 return Err(HostProviderError::Unavailable);
             }
             if !waiter_is_registered(&state, location, waiter) {
@@ -258,7 +493,7 @@ impl Test262AtomicsWaiter {
                 continue;
             };
             let Some(remaining) = limit.checked_sub(started.elapsed()) else {
-                remove_waiter(&mut state, location, waiter);
+                let _ = remove_waiter(&mut state, location, waiter);
                 return Ok(AtomicsWaitResult::TimedOut);
             };
             let (next, elapsed) = self
@@ -268,7 +503,7 @@ impl Test262AtomicsWaiter {
                 .map_err(provider_failure)?;
             state = next;
             if elapsed.timed_out() && waiter_is_registered(&state, location, waiter) {
-                remove_waiter(&mut state, location, waiter);
+                let _ = remove_waiter(&mut state, location, waiter);
                 return Ok(AtomicsWaitResult::TimedOut);
             }
         }
@@ -469,18 +704,22 @@ fn waiter_is_registered(
     state
         .waiter_queues
         .get(&location)
-        .is_some_and(|queue| queue.contains(&waiter))
+        .is_some_and(|queue| queue.iter().any(|registration| registration.id == waiter))
 }
 
 /// Removes one timed-out waiter without disturbing FIFO order for remaining agents.
-fn remove_waiter(state: &mut Test262AgentState, location: AtomicsWaitLocation, waiter: u64) {
-    let Some(queue) = state.waiter_queues.get_mut(&location) else {
-        return;
-    };
-    if let Some(position) = queue.iter().position(|candidate| *candidate == waiter) {
-        queue.remove(position);
-    }
+fn remove_waiter(
+    state: &mut Test262AgentState,
+    location: AtomicsWaitLocation,
+    waiter: u64,
+) -> Option<WaiterRegistration> {
+    let queue = state.waiter_queues.get_mut(&location)?;
+    let removed = queue
+        .iter()
+        .position(|registration| registration.id == waiter)
+        .and_then(|position| queue.remove(position));
     if queue.is_empty() {
         state.waiter_queues.remove(&location);
     }
+    removed
 }

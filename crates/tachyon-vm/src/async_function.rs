@@ -449,9 +449,10 @@ impl Isolate {
             return Err(ExecutionError::UnsupportedAsyncFunctionResume);
         }
         let state = self.async_function_state_reference(continuation.first())?;
+        let promise = self.async_function_promise(state)?;
         let paused = core::mem::take(&mut self.fiber);
         self.fiber = self.publish_prepared_async_function_pause(state, paused)?;
-        Ok(())
+        self.finish_async_function_call_continuation(promise)
     }
 
     /// Resumes one awaited completion from the Promise checkpoint, never synchronously.
@@ -493,7 +494,7 @@ impl Isolate {
         let state = self.async_function_state_reference(continuation.first())?;
         let promise = self.async_function_promise(state)?;
         self.settle_promise(promise, PromiseState::Fulfilled, value)?;
-        self.restore_async_function_caller(state)
+        self.restore_async_function_caller(state, promise)
     }
 
     /// Converts an uncaught async-body throw into rejection and restores its caller Fiber.
@@ -505,7 +506,7 @@ impl Isolate {
         let state = self.async_function_state_reference(continuation.first())?;
         let promise = self.async_function_promise(state)?;
         self.settle_promise(promise, PromiseState::Rejected, reason)?;
-        self.restore_async_function_caller(state)
+        self.restore_async_function_caller(state, promise)
     }
 
     #[inline]
@@ -532,10 +533,13 @@ impl Isolate {
     fn set_async_function_caller(
         &mut self,
         state: GcRef<AsyncFunctionState>,
-        caller: Fiber,
+        mut caller: Fiber,
     ) -> Result<(), ExecutionError> {
         self.heap.with_running_scope(|scope| {
             let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope
+                .write_trace_barriers(state, &mut caller)
+                .map_err(ExecutionError::HeapReference)?;
             scope.with_no_gc_scope(|no_gc| {
                 let state = no_gc
                     .borrow_mut(state, self.types.async_function_state)
@@ -589,10 +593,13 @@ impl Isolate {
     fn publish_prepared_async_function_pause(
         &mut self,
         state: GcRef<AsyncFunctionState>,
-        paused: Fiber,
+        mut paused: Fiber,
     ) -> Result<Fiber, ExecutionError> {
         self.heap.with_running_scope(|scope| {
             let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope
+                .write_trace_barriers(state, &mut paused)
+                .map_err(ExecutionError::HeapReference)?;
             scope.with_no_gc_scope(|no_gc| {
                 let state = no_gc
                     .borrow_mut(state, self.types.async_function_state)
@@ -616,10 +623,13 @@ impl Isolate {
     fn take_async_function_pause(
         &mut self,
         state: GcRef<AsyncFunctionState>,
-        caller: Fiber,
+        mut caller: Fiber,
     ) -> Result<(Fiber, u32, WordOffset), ExecutionError> {
         self.heap.with_running_scope(|scope| {
             let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope
+                .write_trace_barriers(state, &mut caller)
+                .map_err(ExecutionError::HeapReference)?;
             scope.with_no_gc_scope(|no_gc| {
                 let state = no_gc
                     .borrow_mut(state, self.types.async_function_state)
@@ -663,6 +673,7 @@ impl Isolate {
     fn restore_async_function_caller(
         &mut self,
         state: GcRef<AsyncFunctionState>,
+        promise: Value,
     ) -> Result<(), ExecutionError> {
         let caller = self.heap.with_running_scope(|scope| {
             let state = scope.root(state).map_err(ExecutionError::Root)?;
@@ -676,6 +687,27 @@ impl Isolate {
             })
         })?;
         self.fiber = caller;
-        Ok(())
+        self.finish_async_function_call_continuation(promise)
+    }
+
+    /// Returns an async handler's immediate Promise to a native Promise reaction caller.
+    fn finish_async_function_call_continuation(
+        &mut self,
+        promise: Value,
+    ) -> Result<(), ExecutionError> {
+        let Some(frame) = self.fiber.frames.last() else {
+            return Ok(());
+        };
+        if self.fiber.completions.len() <= frame.completion_base as usize {
+            return Ok(());
+        }
+        let Some(continuation) = self.fiber.completions.last_native() else {
+            return Ok(());
+        };
+        if continuation.kind() != NativeContinuationKind::PromiseReaction {
+            return Ok(());
+        }
+        let continuation = self.pop_native_continuation()?;
+        self.finish_promise_reaction(continuation, promise)
     }
 }

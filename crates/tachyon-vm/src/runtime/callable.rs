@@ -126,6 +126,7 @@ pub(crate) enum AtomicsFunction {
     Store,
     Sub,
     Wait,
+    WaitAsync,
     Xor,
 }
 
@@ -180,7 +181,7 @@ impl HostAgentFunction {
 }
 
 impl AtomicsFunction {
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::Add,
         Self::And,
         Self::CompareExchange,
@@ -193,6 +194,7 @@ impl AtomicsFunction {
         Self::Store,
         Self::Sub,
         Self::Wait,
+        Self::WaitAsync,
         Self::Xor,
     ];
 
@@ -211,6 +213,7 @@ impl AtomicsFunction {
             Self::Store => "store",
             Self::Sub => "sub",
             Self::Wait => "wait",
+            Self::WaitAsync => "waitAsync",
             Self::Xor => "xor",
         }
     }
@@ -221,7 +224,7 @@ impl AtomicsFunction {
             Self::Pause => 0,
             Self::IsLockFree => 1,
             Self::Load => 2,
-            Self::CompareExchange | Self::Wait => 4,
+            Self::CompareExchange | Self::Wait | Self::WaitAsync => 4,
             Self::Add
             | Self::And
             | Self::Exchange

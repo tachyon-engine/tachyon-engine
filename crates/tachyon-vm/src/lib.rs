@@ -30,6 +30,7 @@ mod async_from_sync_iterator;
 mod async_function;
 mod async_module;
 mod atom;
+mod atomics_async;
 mod bigint;
 mod bound_function;
 mod builtins;
@@ -99,9 +100,9 @@ pub use finalization::{
     FinalizationSafepointStats,
 };
 pub use host::{
-    AgentBroadcast, AgentBroadcastValue, AgentHostProvider, AtomicsWaitLocation, AtomicsWaitResult,
-    AtomicsWaiterProvider, HostProviderError, HostProviders, SharedMemoryId, TimeZoneProvider,
-    WallClockProvider,
+    AgentBroadcast, AgentBroadcastValue, AgentHostProvider, AtomicsAsyncWait,
+    AtomicsAsyncWaitStart, AtomicsWaitLocation, AtomicsWaitResult, AtomicsWaiterProvider,
+    HostProviderError, HostProviders, SharedMemoryId, TimeZoneProvider, WallClockProvider,
 };
 pub use isolate::Isolate;
 pub use module::{

@@ -289,10 +289,13 @@ impl Isolate {
     fn publish_async_module_pause(
         &mut self,
         state: GcRef<AsyncModuleState>,
-        paused: Fiber,
+        mut paused: Fiber,
     ) -> Result<Fiber, ExecutionError> {
         self.heap.with_running_scope(|scope| {
             let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope
+                .write_trace_barriers(state, &mut paused)
+                .map_err(ExecutionError::HeapReference)?;
             scope.with_no_gc_scope(|no_gc| {
                 let state = no_gc
                     .borrow_mut(state, self.types.async_module_state)
@@ -309,10 +312,13 @@ impl Isolate {
     fn take_async_module_pause(
         &mut self,
         state: GcRef<AsyncModuleState>,
-        caller: Fiber,
+        mut caller: Fiber,
     ) -> Result<(Fiber, u32, WordOffset), ExecutionError> {
         self.heap.with_running_scope(|scope| {
             let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope
+                .write_trace_barriers(state, &mut caller)
+                .map_err(ExecutionError::HeapReference)?;
             scope.with_no_gc_scope(|no_gc| {
                 let state = no_gc
                     .borrow_mut(state, self.types.async_module_state)
