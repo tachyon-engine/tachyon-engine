@@ -1009,6 +1009,14 @@ fn check_manifest(crate_name: &str, manifest: &str, violations: &mut Vec<String>
         .as_slice(),
         "tachyon-compiler" => ["tachyon-gc", "tachyon-vm", "tachyon"].as_slice(),
         "tachyon-vm" => ["tachyon-compiler", "tachyon"].as_slice(),
+        "tachyon-intl-icu4x" => [
+            "tachyon-value",
+            "tachyon-bytecode",
+            "tachyon-gc",
+            "tachyon-compiler",
+            "tachyon",
+        ]
+        .as_slice(),
         "tachyon" => [].as_slice(),
         _ => unreachable!("ENGINE_CRATES contains only known crates"),
     };
