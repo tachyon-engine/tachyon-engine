@@ -778,6 +778,11 @@ pub(crate) enum NativeFunction {
     IntlLocaleNumberingSystem,
     IntlGetCanonicalLocales,
     IntlSupportedValuesOf,
+    IntlCollatorConstructor,
+    IntlCollatorCompareGetter,
+    IntlCollatorCompare,
+    IntlCollatorResolvedOptions,
+    IntlCollatorSupportedLocalesOf,
     JsonParse,
     JsonStringify,
     MathAbs,
@@ -1144,6 +1149,7 @@ impl NativeFunction {
                 | Self::WeakRefConstructor
                 | Self::FinalizationRegistryConstructor
                 | Self::IntlLocaleConstructor
+                | Self::IntlCollatorConstructor
         )
     }
 
@@ -1575,11 +1581,16 @@ impl NativeFunction {
             Self::SymbolToPrimitive => 1,
             Self::IntlLocaleConstructor
             | Self::IntlGetCanonicalLocales
-            | Self::IntlSupportedValuesOf => 1,
+            | Self::IntlSupportedValuesOf
+            | Self::IntlCollatorSupportedLocalesOf => 1,
             Self::IntlLocaleToString
             | Self::IntlLocaleCalendar
             | Self::IntlLocaleCollation
-            | Self::IntlLocaleNumberingSystem => 0,
+            | Self::IntlLocaleNumberingSystem
+            | Self::IntlCollatorCompareGetter
+            | Self::IntlCollatorResolvedOptions
+            | Self::IntlCollatorConstructor => 0,
+            Self::IntlCollatorCompare => 2,
             Self::JsonParse => 2,
             Self::JsonStringify => 3,
             Self::HostCreateRealm => 0,
@@ -2002,6 +2013,11 @@ impl NativeFunction {
             Self::IntlLocaleNumberingSystem => "get numberingSystem",
             Self::IntlGetCanonicalLocales => "getCanonicalLocales",
             Self::IntlSupportedValuesOf => "supportedValuesOf",
+            Self::IntlCollatorConstructor => "Collator",
+            Self::IntlCollatorCompareGetter => "get compare",
+            Self::IntlCollatorCompare => "",
+            Self::IntlCollatorResolvedOptions => "resolvedOptions",
+            Self::IntlCollatorSupportedLocalesOf => "supportedLocalesOf",
             Self::JsonParse => "parse",
             Self::JsonStringify => "stringify",
             Self::HostCreateRealm => "createRealm",
@@ -2329,6 +2345,7 @@ pub(crate) enum ObjectReceiver {
     Function(GcRef<FunctionObject>),
     Error(GcRef<ErrorObject>),
     Date(GcRef<DateObject>),
+    IntlCollator(GcRef<IntlCollatorObject>),
     Number(GcRef<NumberObject>),
     BigInt(GcRef<BigIntObject>),
     Boolean(GcRef<BooleanObject>),
@@ -2368,6 +2385,7 @@ impl ObjectReceiver {
             Self::Function(function) => Value::from_heap_ref(function.raw()),
             Self::Error(error) => Value::from_heap_ref(error.raw()),
             Self::Date(date) => Value::from_heap_ref(date.raw()),
+            Self::IntlCollator(collator) => Value::from_heap_ref(collator.raw()),
             Self::Number(number) => Value::from_heap_ref(number.raw()),
             Self::BigInt(bigint) => Value::from_heap_ref(bigint.raw()),
             Self::Boolean(boolean) => Value::from_heap_ref(boolean.raw()),
@@ -2598,6 +2616,9 @@ pub(crate) struct VmTypes {
     pub(crate) function: GcType<FunctionObject>,
     pub(crate) error_object: GcType<ErrorObject>,
     pub(crate) date_object: GcType<DateObject>,
+    pub(crate) intl_collator_backend: GcType<IntlCollatorBackendPayload>,
+    pub(crate) intl_collator_object: GcType<IntlCollatorObject>,
+    pub(crate) pending_intl_collator: GcType<PendingIntlCollator>,
     pub(crate) proxy_object: GcType<ProxyObject>,
     pub(crate) number_object: GcType<NumberObject>,
     pub(crate) bigint_object: GcType<BigIntObject>,
@@ -2770,6 +2791,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidDatePrimitiveHint(_)
         | ExecutionError::InvalidJsonCircularStructure
         | ExecutionError::InvalidLocaleListElement(_)
+        | ExecutionError::IncompatibleIntlCollatorReceiver(_)
         | ExecutionError::TypedArraySpeciesResultTooShort
         | ExecutionError::DetachedArrayBuffer
         | ExecutionError::FixedLengthSharedArrayBuffer
@@ -2799,6 +2821,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::NegativeSetSize(_)
         | ExecutionError::InvalidNormalizationForm
         | ExecutionError::InvalidIntlSupportedValuesKey
+        | ExecutionError::InvalidIntlCollatorOption
         | ExecutionError::InvalidLanguageTag => Some(NativeErrorKind::Range),
         ExecutionError::InvalidUriEncoding => Some(NativeErrorKind::Uri),
         _ => None,

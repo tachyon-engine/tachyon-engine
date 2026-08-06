@@ -1,6 +1,7 @@
 //! Host-owned capabilities used by ECMAScript builtins without platform access in engine core.
 
 use core::{
+    cmp::Ordering,
     fmt,
     num::NonZeroUsize,
     task::{Context, Poll},
@@ -181,6 +182,82 @@ pub enum IntlSupportedValuesKey {
     Unit,
 }
 
+/// Locale-selection algorithm requested by an Intl service constructor.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum IntlLocaleMatcher {
+    Lookup,
+    #[default]
+    BestFit,
+}
+
+/// Collator operation selected by the ECMAScript `usage` option.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlCollatorUsage {
+    #[default]
+    Sort,
+    Search,
+}
+
+/// Strength exposed through `Intl.Collator.prototype.resolvedOptions`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlCollatorSensitivity {
+    Base,
+    Accent,
+    Case,
+    Variant,
+}
+
+/// Case ordering exposed through the optional `kf` extension key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlCollatorCaseFirst {
+    Upper,
+    Lower,
+    False,
+}
+
+/// Fully converted, owned request passed from the VM to one Collator adapter.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct IntlCollatorRequest {
+    pub locales: Box<[Box<str>]>,
+    pub locale_matcher: IntlLocaleMatcher,
+    pub usage: IntlCollatorUsage,
+    pub collation: Option<Box<str>>,
+    pub numeric: Option<bool>,
+    pub case_first: Option<IntlCollatorCaseFirst>,
+    pub sensitivity: Option<IntlCollatorSensitivity>,
+    pub ignore_punctuation: Option<bool>,
+}
+
+/// Provider-resolved immutable slots stored by one initialized Collator object.
+#[derive(Debug, Eq, PartialEq)]
+pub struct IntlCollatorResolved {
+    pub locale: Box<str>,
+    pub usage: IntlCollatorUsage,
+    pub sensitivity: IntlCollatorSensitivity,
+    pub ignore_punctuation: bool,
+    pub collation: Box<str>,
+    pub numeric: bool,
+    pub case_first: IntlCollatorCaseFirst,
+}
+
+/// Opaque compiled collation state retained by a GC-owned external payload.
+pub trait IntlCollatorBackend: Send {
+    /// Compares potentially ill-formed ECMAScript UTF-16 without allocating managed data.
+    fn compare_utf16(&self, left: &[u16], right: &[u16]) -> Result<Ordering, HostProviderError>;
+
+    /// Reports only heap backing retained beyond the boxed trait object itself.
+    fn external_memory_bytes(&self) -> usize;
+}
+
+/// One resolved Collator snapshot paired with its reusable compiled backend.
+pub struct IntlCollatorCreation {
+    pub resolved: IntlCollatorResolved,
+    pub backend: Box<dyn IntlCollatorBackend>,
+}
+
 /// Supplies locale data operations without allowing the VM to read process or filesystem state.
 pub trait IntlProvider: Send {
     /// Returns one canonical BCP 47 locale, or `None` when the input is structurally invalid.
@@ -194,6 +271,23 @@ pub trait IntlProvider: Send {
         &mut self,
         key: IntlSupportedValuesKey,
     ) -> Result<Box<[Box<str>]>, HostProviderError>;
+
+    /// Creates reusable provider-owned collation state from already converted ECMAScript inputs.
+    fn create_collator(
+        &mut self,
+        _request: IntlCollatorRequest,
+    ) -> Result<IntlCollatorCreation, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+
+    /// Filters canonical requested locales while preserving their original canonical spelling.
+    fn collator_supported_locales(
+        &mut self,
+        _locales: &[Box<str>],
+        _matcher: IntlLocaleMatcher,
+    ) -> Result<Box<[Box<str>]>, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
 }
 
 /// Isolate-owned host capabilities; absence remains explicit instead of consulting the process.

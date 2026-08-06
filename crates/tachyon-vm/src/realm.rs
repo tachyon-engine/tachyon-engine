@@ -4072,6 +4072,81 @@ impl Isolate {
         self.realm.intl_supported_values_of = Some(supported_values);
         let supported_values_atom = self.intern_intrinsic_name(b"supportedValuesOf")?;
         self.set_intrinsic_data_property(object, supported_values_atom, supported_values, true)?;
+
+        let collator_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        self.realm.intl_collator_prototype = Some(collator_prototype);
+        let collator_constructor = self.allocate_native_function(
+            NativeFunction::IntlCollatorConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.intl_collator_constructor = Some(collator_constructor);
+        self.set_function_prototype(collator_constructor, collator_prototype)?;
+        self.set_intrinsic_data_property(
+            collator_prototype,
+            constructor_atom,
+            collator_constructor,
+            true,
+        )?;
+        let collator_atom = self.intern_intrinsic_name(b"Collator")?;
+        self.set_intrinsic_data_property(object, collator_atom, collator_constructor, true)?;
+        self.install_collection_accessor(
+            collator_prototype,
+            function_prototype,
+            b"compare",
+            NativeFunction::IntlCollatorCompareGetter,
+        )?;
+        let compare = self.allocate_native_function(
+            NativeFunction::IntlCollatorCompare,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.intl_collator_compare = Some(compare);
+        let resolved_options = self.allocate_native_function(
+            NativeFunction::IntlCollatorResolvedOptions,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let resolved_options_atom = self.intern_intrinsic_name(b"resolvedOptions")?;
+        self.set_intrinsic_data_property(
+            collator_prototype,
+            resolved_options_atom,
+            resolved_options,
+            true,
+        )?;
+        let supported_locales = self.allocate_native_function(
+            NativeFunction::IntlCollatorSupportedLocalesOf,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let supported_locales_atom = self.intern_intrinsic_name(b"supportedLocalesOf")?;
+        self.set_intrinsic_data_property(
+            collator_constructor,
+            supported_locales_atom,
+            supported_locales,
+            true,
+        )?;
         let tag_symbol = self
             .agent
             .well_known_symbols
@@ -4098,6 +4173,20 @@ impl Isolate {
             tag_key,
             DataPropertyDescriptor {
                 value: Some(locale_tag),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+        let collator_tag = self.allocate_runtime_string(
+            JsString::try_from_latin1(b"Intl.Collator")
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        self.define_data_property(
+            collator_prototype,
+            tag_key,
+            DataPropertyDescriptor {
+                value: Some(collator_tag),
                 writable: Some(false),
                 enumerable: Some(false),
                 configurable: Some(true),

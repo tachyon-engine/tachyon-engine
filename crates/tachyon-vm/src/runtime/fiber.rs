@@ -355,6 +355,9 @@ pub(crate) enum ConversionConsumer {
     IntlLocaleListLength,
     IntlLocaleListElement,
     IntlSupportedValuesKey,
+    IntlCollatorOption,
+    IntlCollatorCompareLeft,
+    IntlCollatorCompareRight,
     JsonParseText,
     JsonStringifyNumberSpace,
     JsonStringifyStringSpace,
@@ -511,6 +514,9 @@ impl ConversionConsumer {
             | Self::IntlLocaleListLength
             | Self::IntlLocaleListElement
             | Self::IntlSupportedValuesKey
+            | Self::IntlCollatorOption
+            | Self::IntlCollatorCompareLeft
+            | Self::IntlCollatorCompareRight
             | Self::JsonParseText
             | Self::JsonStringifyNumberSpace
             | Self::JsonStringifyStringSpace
@@ -662,6 +668,9 @@ impl ConversionConsumer {
                 | Self::DateToPrimitiveString
                 | Self::IntlLocaleListElement
                 | Self::IntlSupportedValuesKey
+                | Self::IntlCollatorOption
+                | Self::IntlCollatorCompareLeft
+                | Self::IntlCollatorCompareRight
                 | Self::JsonParseText
                 | Self::JsonStringifyStringSpace
                 | Self::JsonStringifyStringValue
@@ -748,6 +757,9 @@ impl ConversionConsumer {
                 | Self::IntlLocaleListLength
                 | Self::IntlLocaleListElement
                 | Self::IntlSupportedValuesKey
+                | Self::IntlCollatorOption
+                | Self::IntlCollatorCompareLeft
+                | Self::IntlCollatorCompareRight
                 | Self::JsonParseText
                 | Self::JsonStringifyNumberSpace
                 | Self::JsonStringifyStringSpace
@@ -879,6 +891,7 @@ pub(crate) enum PropertyCallbackMode {
     ArrayIteratorLength,
     ArrayIteratorElement,
     ArgumentList,
+    IntlCollator,
     CopyDataProperties,
     DefineProperties,
 }
@@ -1719,6 +1732,20 @@ pub(crate) enum IntlLocaleListStage {
     Get,
 }
 
+/// Observable boundaries in `Intl.Collator` construction and locale filtering.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum IntlCollatorStage {
+    Locales,
+    Usage,
+    LocaleMatcher,
+    Collation,
+    Numeric,
+    CaseFirst,
+    Sensitivity,
+    IgnorePunctuation,
+}
+
 /// Observable boundaries in the Async-from-Sync iterator algorithms.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1844,6 +1871,7 @@ pub(crate) enum NativeContinuationKind {
     TypedArraySlice(TypedArraySliceStage),
     TypedArraySubarray(TypedArraySubarrayStage),
     IntlLocaleList(IntlLocaleListStage),
+    IntlCollator(IntlCollatorStage),
     JsonStringify(JsonStringifyStage),
     JsonParseReviver,
     SignalState(SignalStateStage),
@@ -1885,6 +1913,37 @@ pub(crate) struct NativeContinuation {
 }
 
 impl NativeContinuation {
+    /// Roots Collator constructor state while one ordinary option getter executes JavaScript.
+    #[inline]
+    pub(crate) const fn intl_collator_property_get(
+        site: NativeContinuationSite,
+        state: Value,
+        options: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PropertyGet(PropertyCallbackMode::IntlCollator),
+            first: state,
+            second: options,
+        }
+    }
+
+    /// Roots a pending Collator while locale canonicalization or option access executes JS.
+    #[inline]
+    pub(crate) const fn intl_collator(
+        site: NativeContinuationSite,
+        stage: IntlCollatorStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::IntlCollator(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
     /// Roots the locale-list state across one observable Get or HasProperty operation.
     #[inline]
     pub(crate) const fn intl_locale_list(
@@ -3696,8 +3755,8 @@ pub(crate) struct Fiber {
     pub(crate) derived_activations: Vec<ClassActivation>,
     /// Only base class constructors enter this stack; ordinary functions never pay its cost.
     pub(crate) base_class_activations: Vec<ClassActivation>,
-    /// Frame depths for active class-name lexical environments, sparse across ordinary execution.
-    pub(crate) class_environments: Vec<u32>,
+    /// Frame depths for active dynamic lexical environments, sparse across ordinary execution.
+    pub(crate) lexical_environments: Vec<u32>,
     /// Persistent sloppy-eval var records, sparse across direct-eval-capable activations.
     pub(crate) eval_var_environments: Vec<EvalVarEnvironment>,
     /// Transient construct calls that cross receiver/prototype allocation safepoints.
@@ -3751,7 +3810,7 @@ impl Fiber {
         debug_assert!(self.base_class_activations.iter().all(|activation| {
             activation.frame_depth != 0 && activation.frame_depth as usize <= self.frames.len()
         }));
-        debug_assert!(self.class_environments.iter().all(|depth| {
+        debug_assert!(self.lexical_environments.iter().all(|depth| {
             *depth != 0 && usize::try_from(*depth).is_ok_and(|depth| depth <= self.frames.len())
         }));
         debug_assert!(self.eval_var_environments.iter().all(|environment| {

@@ -102,7 +102,9 @@ pub use finalization::{
 pub use host::{
     AgentBroadcast, AgentBroadcastValue, AgentHostProvider, AtomicsAsyncWait,
     AtomicsAsyncWaitStart, AtomicsWaitLocation, AtomicsWaitResult, AtomicsWaiterProvider,
-    HostProviderError, HostProviders, IntlProvider, IntlSupportedValuesKey, SharedMemoryId,
+    HostProviderError, HostProviders, IntlCollatorBackend, IntlCollatorCaseFirst,
+    IntlCollatorCreation, IntlCollatorRequest, IntlCollatorResolved, IntlCollatorSensitivity,
+    IntlCollatorUsage, IntlLocaleMatcher, IntlProvider, IntlSupportedValuesKey, SharedMemoryId,
     TimeZoneProvider, WallClockProvider,
 };
 pub use isolate::Isolate;
@@ -199,6 +201,7 @@ pub(crate) enum IntrinsicPrototypeKind {
     Array,
     Boolean,
     Date,
+    IntlCollator,
     SignalState,
     SignalComputed,
     SignalWatcher,
@@ -234,8 +237,8 @@ use bound_function::BoundFunctionData;
 use builtins::object::PendingGetOwnPropertyDescriptors;
 use builtins::signals::{ComputedSignal, SignalRuntime, StateSignal, WatcherSignal};
 use builtins::{
-    PendingDateNumericArguments, PendingJsonStringify, math_variadic_add, math_variadic_finish,
-    math_variadic_initial,
+    PendingDateNumericArguments, PendingIntlCollator, PendingJsonStringify, math_variadic_add,
+    math_variadic_finish, math_variadic_initial,
 };
 use collection::{
     CollectionInitializerKind, MapObject, OrderedCollection, PendingCollectionForEach,
@@ -262,7 +265,8 @@ use iterator_helper::{IteratorHelperObject, WrapForValidIteratorObject};
 use math_conversion::PendingMathOperation;
 use math_sum_precise::ExactSumAccumulator;
 use object::{
-    ArgumentsObject, BigIntObject, BooleanObject, DateObject, NumberObject, OrdinaryObject,
+    ArgumentsObject, BigIntObject, BooleanObject, DateObject, IntlCollatorBackendPayload,
+    IntlCollatorObject, IntlCollatorResolvedOptions, NumberObject, OrdinaryObject,
     PropertyAttributes, PropertyKey, PropertyKind, PropertyLookup, PropertyStorage, RegExpObject,
     ShapeId, ShapeTable, SharedArrayBufferBacking, SharedArrayBufferData, StringObject, SymbolId,
     SymbolObject, SymbolPropertyKey,
@@ -320,21 +324,21 @@ use runtime::{
         ConversionConsumer, ConversionContinuation, ConversionNativeFunction,
         CopyDataPropertiesStage, DateToJsonStage, DefinePropertiesStage, ErrorConstructorStage,
         ErrorStackSetterStage, ErrorToStringStage, EvalVarEnvironment, Fiber, Frame,
-        GetOwnPropertyDescriptorsStage, InstanceElementStage, InstanceOfStage, IntlLocaleListStage,
-        IteratorEagerStage, IteratorFromStage, IteratorHelperStage, IteratorPrototypeSetterKey,
-        IteratorPrototypeSetterStage, JsonStringifyStage, MathSumPreciseStage, NativeContinuation,
-        NativeContinuationKind, NativeContinuationSite, ObjectLookupAccessorStage,
-        ObjectToLocaleStringStage, PreferredType, PromiseCatchStage, PromiseFinallyMethodStage,
-        PromiseResolutionMode, PromiseStaticResolveStage, PromiseThenStage, PropertyCallbackMode,
-        PropertyMutationRoots, PropertyWriteMode, PrototypeInitializationRoots, ProxyCallStage,
-        ProxyContinuationStage, ProxyDefineMode, ProxyDefineStage, ProxyDeleteMode,
-        ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage, ProxyGetStage, ProxyHasStage,
-        ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage, ProxySetMode,
-        ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage, RegExpSearchStage,
-        RegExpStringIteratorStage, RegExpTestStage, SetOperationStage, SignalStateStage,
-        StringMatchStage, StringPrototypeOperation, StringPrototypeStage, StringRawStage,
-        StringReplaceAllStage, StringSplitStage, SymbolAllocationRoots, ToPrimitiveStage,
-        TypedArrayConstructionStage, TypedArraySetStage, TypedArraySliceStage,
+        GetOwnPropertyDescriptorsStage, InstanceElementStage, InstanceOfStage, IntlCollatorStage,
+        IntlLocaleListStage, IteratorEagerStage, IteratorFromStage, IteratorHelperStage,
+        IteratorPrototypeSetterKey, IteratorPrototypeSetterStage, JsonStringifyStage,
+        MathSumPreciseStage, NativeContinuation, NativeContinuationKind, NativeContinuationSite,
+        ObjectLookupAccessorStage, ObjectToLocaleStringStage, PreferredType, PromiseCatchStage,
+        PromiseFinallyMethodStage, PromiseResolutionMode, PromiseStaticResolveStage,
+        PromiseThenStage, PropertyCallbackMode, PropertyMutationRoots, PropertyWriteMode,
+        PrototypeInitializationRoots, ProxyCallStage, ProxyContinuationStage, ProxyDefineMode,
+        ProxyDefineStage, ProxyDeleteMode, ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage,
+        ProxyGetStage, ProxyHasStage, ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage,
+        ProxySetMode, ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage,
+        RegExpSearchStage, RegExpStringIteratorStage, RegExpTestStage, SetOperationStage,
+        SignalStateStage, StringMatchStage, StringPrototypeOperation, StringPrototypeStage,
+        StringRawStage, StringReplaceAllStage, StringSplitStage, SymbolAllocationRoots,
+        ToPrimitiveStage, TypedArrayConstructionStage, TypedArraySetStage, TypedArraySliceStage,
         TypedArraySubarrayStage, TypedArrayTransformStage, VmRoots, WrapForValidIteratorStage,
         next_to_primitive_stage,
     },
@@ -558,7 +562,9 @@ pub enum ExecutionError {
     InvalidNormalizationForm,
     InvalidLanguageTag,
     InvalidIntlSupportedValuesKey,
+    InvalidIntlCollatorOption,
     InvalidLocaleListElement(Value),
+    IncompatibleIntlCollatorReceiver(Value),
     InvalidUriEncoding,
     UnsupportedTypeof(Value),
     InvalidCode(CodeId),

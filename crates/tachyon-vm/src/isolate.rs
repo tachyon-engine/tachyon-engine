@@ -3,7 +3,7 @@
 use core::mem;
 
 use super::*;
-use crate::{driver::DriverActiveWork, module::ModuleGraph};
+use crate::{IntlCollatorBackend, driver::DriverActiveWork, module::ModuleGraph};
 
 struct CollectionAllocationRoots<'a> {
     vm: VmRoots<'a>,
@@ -38,6 +38,14 @@ struct PromiseFinallyResultRoots<'a> {
     retained: Value,
 }
 
+struct IntlCollatorAllocationRoots<'a> {
+    vm: VmRoots<'a>,
+    prototype: Value,
+    locale: Value,
+    collation: Value,
+    backend: Option<GcRef<IntlCollatorBackendPayload>>,
+}
+
 impl Trace for RegExpAllocationRoots<'_> {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
@@ -53,6 +61,17 @@ impl Trace for PromiseFinallyResultRoots<'_> {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.vm.trace(tracer);
         self.retained.trace(tracer);
+    }
+}
+
+impl Trace for IntlCollatorAllocationRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.prototype.trace(tracer);
+        self.locale.trace(tracer);
+        self.collation.trace(tracer);
+        self.backend.trace(tracer);
     }
 }
 
@@ -136,6 +155,7 @@ impl Isolate {
             IntrinsicPrototypeKind::Array => realm.array_prototype,
             IntrinsicPrototypeKind::Boolean => realm.boolean_prototype,
             IntrinsicPrototypeKind::Date => realm.date_prototype,
+            IntrinsicPrototypeKind::IntlCollator => realm.intl_collator_prototype,
             IntrinsicPrototypeKind::SignalState => realm.signal_state_prototype,
             IntrinsicPrototypeKind::SignalComputed => realm.signal_computed_prototype,
             IntrinsicPrototypeKind::SignalWatcher => realm.signal_watcher_prototype,
@@ -577,6 +597,15 @@ impl Isolate {
                 .map_err(IsolateCreationError::TypeRegistration)?,
             date_object: registry
                 .try_register("DateObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            intl_collator_backend: registry
+                .try_register("IntlCollatorBackendPayload")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            intl_collator_object: registry
+                .try_register("IntlCollatorObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_intl_collator: registry
+                .try_register("PendingIntlCollator")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             proxy_object: registry
                 .try_register("ProxyObject")
@@ -1594,6 +1623,72 @@ impl Isolate {
             .map(|object| Value::from_heap_ref(object.raw()))
             .map_err(ExecutionError::HeapAllocation)?;
         self.realm.retain_construction_value(value)
+    }
+
+    /// Allocates a host comparator payload and its branded ordinary wrapper as one rooted unit.
+    pub(crate) fn allocate_intl_collator_object(
+        &mut self,
+        backend: Box<dyn IntlCollatorBackend>,
+        locale: Value,
+        collation: Value,
+        options: IntlCollatorResolvedOptions,
+        prototype: Value,
+        space: AllocationSpace,
+    ) -> Result<Value, ExecutionError> {
+        let mut roots = IntlCollatorAllocationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
+                loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
+            },
+            prototype,
+            locale,
+            collation,
+            backend: None,
+        };
+        let backend = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.intl_collator_backend,
+                0,
+                IntlCollatorBackendPayload { backend },
+                space,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        roots.backend = Some(backend);
+        self.heap
+            .try_allocate_with_gc(
+                self.types.intl_collator_object,
+                0,
+                0,
+                IntlCollatorObject {
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: roots.prototype,
+                    },
+                    backend,
+                    locale: roots.locale,
+                    collation: roots.collation,
+                    cached_bound_compare: Value::from_immediate(Immediate::Undefined),
+                    usage: options.usage,
+                    sensitivity: options.sensitivity,
+                    case_first: options.case_first,
+                    ignore_punctuation: options.ignore_punctuation,
+                    numeric: options.numeric,
+                },
+                space,
+                &mut roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)
     }
 
     /// Allocates one boxed Boolean while keeping its ordinary prototype rooted.

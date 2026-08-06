@@ -72,6 +72,56 @@ fn arrow_function_expression_can_be_called() {
 }
 
 #[test]
+/// Keeps captured for-of declaration bindings distinct across iterations and abrupt exits.
+fn for_of_closures_capture_fresh_iteration_environments() {
+    assert_eq!(
+        execute_source(
+            166,
+            "let first; let second; for (const value of [1, 2]) { if (value === 1) { first = () => value; continue; } second = () => value; } first() * 10 + second();",
+        )
+        .as_i32(),
+        Some(12)
+    );
+    assert_eq!(
+        execute_source(
+            167,
+            "let first; let second; for (let value of [1, 2]) { if (value === 1) first = () => value; else second = () => value; value += 10; } first() * 10 + second();",
+        )
+        .as_i32(),
+        Some(122)
+    );
+    assert_eq!(
+        execute_source(
+            168,
+            "let retained; try { for (const value of [7]) { retained = () => value; throw 1; } } catch (error) {} retained();",
+        )
+        .as_i32(),
+        Some(7)
+    );
+}
+
+#[test]
+/// Restores lexical depth when break or labelled continue exits a captured iteration record.
+fn iteration_control_transfers_restore_the_target_environment() {
+    assert_eq!(
+        execute_source(
+            169,
+            "let retained; let outer = 5; for (const key in { a: 1 }) { retained = () => key; break; } (() => outer)() === 5 && retained() === 'a';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
+    assert_eq!(
+        execute_source(
+            170,
+            "let first; let second; outer: for (const value of [1, 2]) { for (const key in { a: 1 }) { if (value === 1) { first = () => key; continue outer; } second = () => key; } } first() === 'a' && second() === 'a';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
+}
+
+#[test]
 fn arguments_object_is_activation_stable_and_indexed() {
     assert_eq!(
         execute_source(

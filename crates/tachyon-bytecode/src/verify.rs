@@ -283,6 +283,7 @@ pub(super) fn validate_finally_instructions(
 ) -> Result<(), ModuleBuildError> {
     let words = bytecode.bytecode().words();
     let mut offset = 0u32;
+    let mut environment_depth = 0u32;
     while (offset as usize) < words.len() {
         let instruction = super::decode_instruction(words, WordOffset::new(offset))
             .expect("verified bytecode remains decodable");
@@ -300,17 +301,18 @@ pub(super) fn validate_finally_instructions(
             }),
             Opcode::BreakThroughFinally | Opcode::ContinueThroughFinally => {
                 let target = instruction.operands[0];
-                handlers.iter().any(|handler| {
-                    handler.kind.is_finalizer()
-                        && ((handler.protected_start.index() <= offset
-                            && offset < handler.protected_end.index()
-                            && !(handler.protected_start.index() <= target
-                                && target < handler.protected_end.index()))
-                            || (handler.handler.index() <= offset
-                                && offset < handler.handler_end.index()
-                                && !(handler.handler.index() <= target
-                                    && target < handler.handler_end.index())))
-                })
+                instruction.operands[1] < environment_depth
+                    || handlers.iter().any(|handler| {
+                        handler.kind.is_finalizer()
+                            && ((handler.protected_start.index() <= offset
+                                && offset < handler.protected_end.index()
+                                && !(handler.protected_start.index() <= target
+                                    && target < handler.protected_end.index()))
+                                || (handler.handler.index() <= offset
+                                    && offset < handler.handler_end.index()
+                                    && !(handler.handler.index() <= target
+                                        && target < handler.handler_end.index())))
+                    })
             }
             _ => true,
         };
@@ -320,6 +322,15 @@ pub(super) fn validate_finally_instructions(
                 offset: WordOffset::new(offset),
                 opcode: instruction.opcode,
             });
+        }
+        match instruction.opcode {
+            Opcode::EnterClassEnvironment | Opcode::EnterLexicalEnvironment => {
+                environment_depth = environment_depth.saturating_add(1);
+            }
+            Opcode::LeaveClassEnvironment | Opcode::LeaveLexicalEnvironment => {
+                environment_depth = environment_depth.saturating_sub(1);
+            }
+            _ => {}
         }
         offset = next;
     }
@@ -410,7 +421,7 @@ pub(super) fn validate_class_instructions(
     Ok(())
 }
 
-/// Verifies balanced class-name environments and forbids control-flow edges across their depth.
+/// Verifies balanced dynamic lexical environments and forbids edges across their depth.
 pub(super) fn validate_class_environments(
     function: FunctionId,
     handlers: &[HandlerEntry],
@@ -431,7 +442,7 @@ pub(super) fn validate_class_environments(
             }
         })?;
         match instruction.opcode {
-            Opcode::EnterClassEnvironment => {
+            Opcode::EnterClassEnvironment | Opcode::EnterLexicalEnvironment => {
                 slot_counts.push(instruction.operands[0]);
                 depth =
                     depth
@@ -443,7 +454,7 @@ pub(super) fn validate_class_environments(
                             actual: depth,
                         })?;
             }
-            Opcode::InitializeClassEnvironment => {
+            Opcode::InitializeClassEnvironment | Opcode::InitializeLexicalEnvironment => {
                 let Some(&slot_count) = slot_counts.last() else {
                     return Err(ModuleBuildError::InvalidClassEnvironmentDepth {
                         function,
@@ -461,7 +472,7 @@ pub(super) fn validate_class_environments(
                     });
                 }
             }
-            Opcode::LeaveClassEnvironment => {
+            Opcode::LeaveClassEnvironment | Opcode::LeaveLexicalEnvironment => {
                 slot_counts.pop();
                 depth =
                     depth
@@ -510,7 +521,20 @@ pub(super) fn validate_class_environments(
                 .expect("verified instruction offsets have an environment depth");
             let target_depth =
                 depth_at[target as usize].expect("verified jump targets have an environment depth");
-            if source_depth != target_depth {
+            let abrupt = matches!(
+                instruction.opcode,
+                Opcode::BreakThroughFinally | Opcode::ContinueThroughFinally
+            );
+            if abrupt && instruction.operands[1] != target_depth {
+                return Err(ModuleBuildError::InvalidClassEnvironmentDepth {
+                    function,
+                    offset: word_offset,
+                    expected: target_depth,
+                    actual: instruction.operands[1],
+                });
+            }
+            if (!abrupt && source_depth != target_depth) || (abrupt && target_depth > source_depth)
+            {
                 return Err(ModuleBuildError::InvalidClassEnvironmentDepth {
                     function,
                     offset: word_offset,
@@ -599,6 +623,7 @@ pub(super) fn validate_binding_plan(
             }
             BindingLocation::Environment { slot, .. }
             | BindingLocation::ClassEnvironment { slot, .. }
+            | BindingLocation::LexicalEnvironment { slot, .. }
             | BindingLocation::ModuleFunction { slot, .. }
                 if slot >= max_environment_slot_count =>
             {
@@ -876,13 +901,20 @@ fn verify_instruction(
         | Opcode::ReturnUndefined
         | Opcode::DeclareScope
         | Opcode::DeclareGlobalLexical
-        | Opcode::LeaveClassEnvironment => {}
-        Opcode::EnterClassEnvironment => {
+        | Opcode::LeaveClassEnvironment
+        | Opcode::LeaveLexicalEnvironment => {}
+        Opcode::EnterClassEnvironment | Opcode::EnterLexicalEnvironment => {
             if operands[0] == 0 || operands[0] > context.max_environment_slot_count {
                 return Err(VerifyError::EnvironmentSlotOutOfRange {
                     offset,
                     slot: operands[0].saturating_sub(1),
                     max_environment_slot_count: context.max_environment_slot_count,
+                });
+            }
+            if instruction.opcode == Opcode::EnterLexicalEnvironment && operands[1] > 1 {
+                return Err(VerifyError::InvalidBooleanOperand {
+                    offset,
+                    operand: operands[1],
                 });
             }
         }
@@ -923,7 +955,7 @@ fn verify_instruction(
             check_register(operands[1])?;
             check_register(operands[2])?;
         }
-        Opcode::InitializeClassEnvironment => {
+        Opcode::InitializeClassEnvironment | Opcode::InitializeLexicalEnvironment => {
             check_register(operands[0])?;
             if operands[1] >= context.max_environment_slot_count {
                 return Err(VerifyError::EnvironmentSlotOutOfRange {
@@ -1266,7 +1298,10 @@ fn verify_instruction(
     {
         return Err(VerifyError::InvalidJumpTarget {
             offset,
-            target: if instruction.opcode == Opcode::Jump {
+            target: if matches!(
+                instruction.opcode,
+                Opcode::Jump | Opcode::BreakThroughFinally | Opcode::ContinueThroughFinally
+            ) {
                 operands[0]
             } else {
                 operands[1]

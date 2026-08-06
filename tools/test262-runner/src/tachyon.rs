@@ -1051,6 +1051,43 @@ mod tests {
     }
 
     #[test]
+    /// Preserves the exact JavaScript exception thrown by every ordered Collator option getter.
+    fn collator_option_getters_propagate_original_exceptions() {
+        let source = r#"
+            function CustomError() {}
+            function assertThrows(expected, callback) {
+              try {
+                callback();
+              } catch (error) {
+                if (typeof error === "object" && error !== null &&
+                    error.constructor === expected) return;
+                throw new Error("wrong constructor");
+              }
+              throw new Error("no exception");
+            }
+            for (const option of [
+              "usage",
+              "localeMatcher",
+              "collation",
+              "numeric",
+              "caseFirst",
+              "sensitivity",
+              "ignorePunctuation"
+            ]) {
+              assertThrows(CustomError, () => {
+                new Intl.Collator("en", {
+                  get [option]() { throw new CustomError(); }
+                });
+              });
+            }
+        "#;
+        assert_eq!(
+            execute(&composed(source, &[], false)),
+            EngineOutcome::Completed
+        );
+    }
+
+    #[test]
     /// Covers source/message conversion, SAB identity, report FIFO, and normal worker teardown.
     fn adapter_agents_share_sab_and_report_without_leaking_workers() {
         let mut test = composed(

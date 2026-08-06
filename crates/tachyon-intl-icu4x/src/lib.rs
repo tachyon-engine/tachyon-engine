@@ -7,6 +7,7 @@
 )]
 //! ICU4X-backed locale-data provider for Tachyon's executor-neutral Intl boundary.
 
+mod collator;
 mod supported_values;
 
 use icu_locale::{
@@ -14,7 +15,10 @@ use icu_locale::{
     extensions::transform::{Key as TransformKey, Value as TransformValue},
     extensions::unicode::{Key, Value},
 };
-use tachyon_vm::{HostProviderError, IntlProvider, IntlSupportedValuesKey};
+use tachyon_vm::{
+    HostProviderError, IntlCollatorCreation, IntlCollatorRequest, IntlLocaleMatcher, IntlProvider,
+    IntlSupportedValuesKey,
+};
 
 /// Extension aliases required by UTS 35 but absent from ICU4X 2.0's locale canonicalizer.
 ///
@@ -100,6 +104,21 @@ impl IntlProvider for Icu4xIntlProvider {
         key: IntlSupportedValuesKey,
     ) -> Result<Box<[Box<str>]>, HostProviderError> {
         Ok(supported_values::supported_values(key))
+    }
+
+    fn create_collator(
+        &mut self,
+        request: IntlCollatorRequest,
+    ) -> Result<IntlCollatorCreation, HostProviderError> {
+        collator::create(self.default_locale.as_ref(), request)
+    }
+
+    fn collator_supported_locales(
+        &mut self,
+        locales: &[Box<str>],
+        matcher: IntlLocaleMatcher,
+    ) -> Result<Box<[Box<str>]>, HostProviderError> {
+        Ok(collator::supported_locales(locales, matcher))
     }
 }
 

@@ -20,7 +20,7 @@ use crate::{
     ScopeId, SourceName, SourceSpan,
 };
 
-use super::{EnvironmentPlans, GlobalLexicalPlan};
+use super::{EnvironmentPlans, EnvironmentStorageKind, GlobalLexicalPlan};
 
 pub(super) struct Lowerer<'a> {
     pub(super) builder: BytecodeBuilder,
@@ -60,6 +60,7 @@ pub(super) struct Lowerer<'a> {
 pub(super) struct ControlTarget {
     label: Label,
     finally_depth: u32,
+    environment_depth: u32,
     name: Option<std::sync::Arc<str>>,
 }
 
@@ -83,6 +84,21 @@ pub(super) struct IteratorRegisters {
     pub(super) receiver: RegisterId,
     pub(super) next: RegisterId,
     done: RegisterId,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct IterationEnvironmentState {
+    previous_scope: ScopeId,
+}
+
+pub(super) struct ForOfPrelude {
+    iterator: IteratorRegisters,
+    condition: Label,
+    natural_end: Label,
+    end: Label,
+    finally_slot: usize,
+    protected_start: tachyon_bytecode::WordOffset,
+    iteration: Option<IterationEnvironmentState>,
 }
 
 impl Lowerer<'_> {
@@ -1199,23 +1215,26 @@ impl Lowerer<'_> {
         let Some(binding) = reference.binding else {
             return Ok(None);
         };
-        let Some((depth, slot, class_environment)) =
+        let Some((depth, slot, environment_kind)) =
             self.environments.reference_slot(self.active_scope, binding)
         else {
             return Ok(None);
         };
         self.add_binding_plan(BindingPlanEntry {
             name: slot.name.clone(),
-            location: if class_environment {
-                BindingLocation::ClassEnvironment {
+            location: match environment_kind {
+                EnvironmentStorageKind::Class => BindingLocation::ClassEnvironment {
                     depth,
                     slot: slot.slot,
-                }
-            } else {
-                BindingLocation::Environment {
+                },
+                EnvironmentStorageKind::Lexical => BindingLocation::LexicalEnvironment {
                     depth,
                     slot: slot.slot,
-                }
+                },
+                EnvironmentStorageKind::Activation => BindingLocation::Environment {
+                    depth,
+                    slot: slot.slot,
+                },
             },
             mutable: slot.mutable,
         })?;
@@ -1328,7 +1347,30 @@ impl Lowerer<'_> {
         register: Option<RegisterId>,
         mutable: bool,
     ) -> Result<(), CompileError> {
-        let storage = if let Some(function_scope) = self.function_scope
+        let storage = if let Some(slot) = self
+            .environments
+            .iteration_slot(self.active_scope, binding.id)
+        {
+            self.add_binding_plan(BindingPlanEntry {
+                name: slot.name.clone(),
+                location: BindingLocation::LexicalEnvironment {
+                    depth: 0,
+                    slot: slot.slot,
+                },
+                mutable: slot.mutable,
+            })?;
+            if let Some(register) = register {
+                self.emit(
+                    Opcode::InitializeLexicalEnvironment,
+                    &[register.index(), slot.slot],
+                    binding.span,
+                )?;
+            }
+            LocalStorage::Environment {
+                depth: 0,
+                slot: slot.slot,
+            }
+        } else if let Some(function_scope) = self.function_scope
             && let Some(slot) = self.environments.local_slot(function_scope, binding.id)
         {
             self.add_binding_plan(BindingPlanEntry {
@@ -1473,21 +1515,25 @@ impl Lowerer<'_> {
             .map_err(CompileError::Builder)
     }
 
-    /// Emits a direct branch or an explicit completion transfer when leaving a finalizer scope.
+    /// Emits a direct branch or an explicit transfer across finalizer or lexical boundaries.
     pub(super) fn emit_control_jump(
         &mut self,
         target: ControlTarget,
         opcode: Opcode,
         span: SourceSpan,
     ) -> Result<(), CompileError> {
-        if target.finally_depth == self.finally_depth {
+        if target.finally_depth == self.finally_depth
+            && target.environment_depth == self.environment_depth
+        {
             return self.emit_jump(target.label, span);
         }
-        debug_assert!(target.finally_depth < self.finally_depth);
+        debug_assert!(target.finally_depth <= self.finally_depth);
+        debug_assert!(target.environment_depth <= self.environment_depth);
         self.builder
             .emit_abrupt_jump(
                 opcode,
                 target.label,
+                target.environment_depth,
                 BytecodeSourceSpan {
                     start: span.start,
                     end: span.end,
@@ -1532,6 +1578,7 @@ impl Lowerer<'_> {
         ControlTarget {
             label,
             finally_depth: self.finally_depth,
+            environment_depth: self.environment_depth,
             name: None,
         }
     }
@@ -1545,6 +1592,7 @@ impl Lowerer<'_> {
         ControlTarget {
             label,
             finally_depth: self.finally_depth,
+            environment_depth: self.environment_depth,
             name: Some(name),
         }
     }
@@ -1554,10 +1602,12 @@ impl Lowerer<'_> {
         &self,
         label: Label,
         finally_depth: u32,
+        environment_depth: u32,
     ) -> ControlTarget {
         ControlTarget {
             label,
             finally_depth,
+            environment_depth,
             name: None,
         }
     }

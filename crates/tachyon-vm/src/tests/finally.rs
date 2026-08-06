@@ -162,7 +162,7 @@ fn nested_control_module(opcode: Opcode) -> CompiledModule {
     builder.emit(Opcode::LoadImmediate, &[0, 0], SPAN).unwrap();
     let outer_start = builder.emit(Opcode::Nop, &[], SPAN).unwrap();
     let inner_start = builder.emit(Opcode::Nop, &[], SPAN).unwrap();
-    builder.emit_abrupt_jump(opcode, end, SPAN).unwrap();
+    builder.emit_abrupt_jump(opcode, end, 0, SPAN).unwrap();
     let inner_handler = builder.emit(Opcode::LoadImmediate, &[0, 1], SPAN).unwrap();
     builder.emit(Opcode::ResumeCompletion, &[], SPAN).unwrap();
     let inner_end = builder.current_offset().unwrap();
@@ -208,7 +208,7 @@ fn stale_completion_module() -> CompiledModule {
     builder.emit(Opcode::Return, &[0], SPAN).unwrap();
     let first_handler = builder.current_offset().unwrap();
     builder
-        .emit_abrupt_jump(Opcode::BreakThroughFinally, after_first, SPAN)
+        .emit_abrupt_jump(Opcode::BreakThroughFinally, after_first, 0, SPAN)
         .unwrap();
     builder.emit(Opcode::ResumeCompletion, &[], SPAN).unwrap();
     let first_end = builder.current_offset().unwrap();

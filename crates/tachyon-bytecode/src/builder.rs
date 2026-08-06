@@ -118,11 +118,12 @@ impl BytecodeBuilder {
         Ok(offset)
     }
 
-    /// Emits a fixed-width abrupt target patched from one symbolic label.
+    /// Emits a fixed-width abrupt target plus its verifier-checked lexical environment depth.
     pub fn emit_abrupt_jump(
         &mut self,
         opcode: Opcode,
         label: Label,
+        environment_depth: u32,
         span: SourceSpan,
     ) -> Result<WordOffset, BuilderError> {
         debug_assert!(matches!(
@@ -130,10 +131,10 @@ impl BytecodeBuilder {
             Opcode::BreakThroughFinally | Opcode::ContinueThroughFinally
         ));
         self.ensure_label(label)?;
-        self.ensure_word_capacity(2)?;
+        self.ensure_word_capacity(3)?;
         let offset = self.next_word_offset()?;
         self.words
-            .extend([((opcode as u8) | WIDE_FORMAT) as u32, 0]);
+            .extend([((opcode as u8) | WIDE_FORMAT) as u32, 0, environment_depth]);
         self.patches.push(JumpPatch {
             label,
             operand_word: WordOffset::new(offset.index() + 1),
@@ -250,8 +251,9 @@ impl BytecodeBuilder {
             | Opcode::ReturnUndefined
             | Opcode::DeclareScope
             | Opcode::DeclareGlobalLexical
-            | Opcode::LeaveClassEnvironment => &[],
-            Opcode::EnterClassEnvironment => &[],
+            | Opcode::LeaveClassEnvironment
+            | Opcode::LeaveLexicalEnvironment => &[],
+            Opcode::EnterClassEnvironment | Opcode::EnterLexicalEnvironment => &[],
             Opcode::LoadUndefined
             | Opcode::LoadNull
             | Opcode::LoadFalse
@@ -266,6 +268,7 @@ impl BytecodeBuilder {
             | Opcode::StoreResolvedScope
             | Opcode::InitializeGlobalLexical
             | Opcode::InitializeClassEnvironment
+            | Opcode::InitializeLexicalEnvironment
             | Opcode::CreatePrivateName
             | Opcode::LoadIteratorSymbol
             | Opcode::LoadAsyncIteratorSymbol

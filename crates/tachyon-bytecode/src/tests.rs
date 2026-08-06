@@ -53,6 +53,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::EnterFinally,
                 Opcode::ResumeCompletion,
                 Opcode::LeaveClassEnvironment,
+                Opcode::LeaveLexicalEnvironment,
             ],
         ),
         (
@@ -76,8 +77,6 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::InitializeThis,
                 Opcode::SuperConstructForwardAll,
                 Opcode::CheckConstructor,
-                Opcode::BreakThroughFinally,
-                Opcode::ContinueThroughFinally,
                 Opcode::EnterClassEnvironment,
             ],
         ),
@@ -111,6 +110,10 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::ExcludePropertyKey,
                 Opcode::CollectRestArguments,
                 Opcode::InitializeClassEnvironment,
+                Opcode::EnterLexicalEnvironment,
+                Opcode::InitializeLexicalEnvironment,
+                Opcode::BreakThroughFinally,
+                Opcode::ContinueThroughFinally,
             ],
         ),
         (
@@ -1559,7 +1562,7 @@ fn compiled_module_rejects_invalid_pool_and_suspend_references() {
     )
     .unwrap_err();
     assert!(matches!(
-        error,
+        &error,
         ModuleBuildError::VerifyFunction {
             error: VerifyError::ConstantOutOfRange { .. },
             ..
@@ -1873,7 +1876,7 @@ fn compiled_module_cross_validates_finally_control_opcodes() {
     )
     .unwrap_err();
     assert!(matches!(
-        error,
+        &error,
         ModuleBuildError::InvalidFinallyInstruction {
             opcode: Opcode::EnterFinally,
             ..
@@ -1925,7 +1928,7 @@ fn compiled_module_rejects_finalizer_without_terminal_resume() {
 #[test]
 /// Rejects abrupt-finally opcodes that neither cross nor originate in a finalizer boundary.
 fn compiled_module_rejects_spurious_abrupt_finally_targets() {
-    let mut uncovered = encode_instruction(Opcode::BreakThroughFinally, &[2]).unwrap();
+    let mut uncovered = encode_instruction(Opcode::BreakThroughFinally, &[3, 0]).unwrap();
     uncovered.extend(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap());
     let error = CompiledModule::new(
         Arc::from(""),
@@ -1939,16 +1942,19 @@ fn compiled_module_rejects_spurious_abrupt_finally_targets() {
         FunctionId::new(0),
     )
     .unwrap_err();
-    assert!(matches!(
-        error,
-        ModuleBuildError::InvalidFinallyInstruction {
-            opcode: Opcode::BreakThroughFinally,
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            error,
+            ModuleBuildError::InvalidFinallyInstruction {
+                opcode: Opcode::BreakThroughFinally,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
 
     let mut retained = encode_instruction(Opcode::Nop, &[]).unwrap();
-    retained.extend(encode_instruction(Opcode::ContinueThroughFinally, &[0]).unwrap());
+    retained.extend(encode_instruction(Opcode::ContinueThroughFinally, &[0, 0]).unwrap());
     retained.extend(encode_instruction(Opcode::ResumeCompletion, &[]).unwrap());
     retained.extend(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap());
     let mut metadata = FunctionMetadata::new(
@@ -1961,9 +1967,9 @@ fn compiled_module_rejects_spurious_abrupt_finally_targets() {
     );
     metadata.handlers = vec![HandlerEntry {
         protected_start: WordOffset::new(0),
-        protected_end: WordOffset::new(3),
-        handler: WordOffset::new(3),
-        handler_end: WordOffset::new(4),
+        protected_end: WordOffset::new(4),
+        handler: WordOffset::new(4),
+        handler_end: WordOffset::new(5),
         kind: HandlerKind::Finally,
         environment_depth: 0,
     }]

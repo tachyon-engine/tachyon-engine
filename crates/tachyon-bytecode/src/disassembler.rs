@@ -67,8 +67,12 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::ReturnUndefined
         | Opcode::EnterFinally
         | Opcode::ResumeCompletion
-        | Opcode::LeaveClassEnvironment => {}
+        | Opcode::LeaveClassEnvironment
+        | Opcode::LeaveLexicalEnvironment => {}
         Opcode::EnterClassEnvironment => write!(output, " slots={}", operands[0])?,
+        Opcode::EnterLexicalEnvironment => {
+            write!(output, " slots={}, mutable={}", operands[0], operands[1])?
+        }
         Opcode::DeclareScope => write!(output, " scope={}", operands[0])?,
         Opcode::DeclareGlobalLexical => {
             write!(output, " scope={}, mutable={}", operands[0], operands[1])?
@@ -86,6 +90,9 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::CheckConstructor
         | Opcode::LoadSuperBase => write!(output, " r{}", operands[0])?,
         Opcode::InitializeClassEnvironment => {
+            write!(output, " r{}, slot={}", operands[0], operands[1])?
+        }
+        Opcode::InitializeLexicalEnvironment => {
             write!(output, " r{}, slot={}", operands[0], operands[1])?
         }
         Opcode::CreatePrivateName => write!(output, " r{}, name={}", operands[0], operands[1])?,
@@ -243,9 +250,12 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
             " target=r{}, closure=r{}, key=r{}",
             operands[0], operands[1], operands[2]
         )?,
-        Opcode::Jump | Opcode::BreakThroughFinally | Opcode::ContinueThroughFinally => {
-            write!(output, " pc={}", operands[0])?
-        }
+        Opcode::Jump => write!(output, " pc={}", operands[0])?,
+        Opcode::BreakThroughFinally | Opcode::ContinueThroughFinally => write!(
+            output,
+            " pc={}, environment_depth={}",
+            operands[0], operands[1]
+        )?,
         Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => {
             write!(output, " r{}, pc={}", operands[0], operands[1])?
         }

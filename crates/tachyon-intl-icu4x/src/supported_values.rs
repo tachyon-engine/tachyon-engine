@@ -56,9 +56,8 @@ const CALENDARS: &[&str] = &[
 ];
 
 /// ICU collations intentionally omit the reserved `search` and `standard` values.
-const COLLATIONS: &[&str] = &[
-    "compat", "dict", "emoji", "eor", "phonebk", "phonetic", "pinyin", "searchjl", "stroke",
-    "trad", "unihan", "zhuyin",
+pub(super) const COLLATIONS: &[&str] = &[
+    "compat", "dict", "emoji", "eor", "phonebk", "pinyin", "stroke", "trad", "unihan", "zhuyin",
 ];
 
 /// ISO 4217 codes supported by the pinned ICU capability set.
@@ -156,6 +155,8 @@ mod tests {
         assert!(CALENDARS.contains(&"gregory"));
         assert!(!COLLATIONS.contains(&"search"));
         assert!(!COLLATIONS.contains(&"standard"));
+        assert!(!COLLATIONS.contains(&"phonetic"));
+        assert!(!COLLATIONS.contains(&"searchjl"));
         assert!(UNITS.iter().all(|unit| !unit.contains("-per-")));
     }
 

@@ -40,6 +40,7 @@ pub(crate) struct CompletionRecord {
     kind: CompletionKind,
     value: Option<Value>,
     target: Option<WordOffset>,
+    target_environment_depth: u32,
 }
 
 impl CompletionRecord {
@@ -53,6 +54,7 @@ impl CompletionRecord {
             kind: CompletionKind::Normal,
             value,
             target: None,
+            target_environment_depth: 0,
         }
     }
 
@@ -62,6 +64,7 @@ impl CompletionRecord {
             kind: CompletionKind::Throw,
             value: Some(value),
             target: None,
+            target_environment_depth: 0,
         }
     }
 
@@ -71,6 +74,7 @@ impl CompletionRecord {
             kind: CompletionKind::Return,
             value: Some(value),
             target: None,
+            target_environment_depth: 0,
         }
     }
 
@@ -79,11 +83,16 @@ impl CompletionRecord {
         not(test),
         allow(dead_code, reason = "M6 finally lowering saves break targets")
     )]
-    pub(crate) const fn break_target(value: Option<Value>, target: WordOffset) -> Self {
+    pub(crate) const fn break_target(
+        value: Option<Value>,
+        target: WordOffset,
+        target_environment_depth: u32,
+    ) -> Self {
         Self {
             kind: CompletionKind::Break,
             value,
             target: Some(target),
+            target_environment_depth,
         }
     }
 
@@ -92,11 +101,16 @@ impl CompletionRecord {
         not(test),
         allow(dead_code, reason = "M6 finally lowering saves continue targets")
     )]
-    pub(crate) const fn continue_target(value: Option<Value>, target: WordOffset) -> Self {
+    pub(crate) const fn continue_target(
+        value: Option<Value>,
+        target: WordOffset,
+        target_environment_depth: u32,
+    ) -> Self {
         Self {
             kind: CompletionKind::Continue,
             value,
             target: Some(target),
+            target_environment_depth,
         }
     }
 
@@ -117,6 +131,11 @@ impl CompletionRecord {
     )]
     pub(crate) const fn target(self) -> Option<WordOffset> {
         self.target
+    }
+
+    #[inline(always)]
+    pub(crate) const fn target_environment_depth(self) -> u32 {
+        self.target_environment_depth
     }
 }
 
@@ -413,8 +432,8 @@ mod tests {
             CompletionRecord::normal(None),
             CompletionRecord::throw(value),
             CompletionRecord::return_value(value),
-            CompletionRecord::break_target(Some(value), target),
-            CompletionRecord::continue_target(None, target),
+            CompletionRecord::break_target(Some(value), target, 0),
+            CompletionRecord::continue_target(None, target, 0),
         ];
         assert_eq!(records[0].kind(), CompletionKind::Normal);
         assert_eq!(records[0].value(), None);

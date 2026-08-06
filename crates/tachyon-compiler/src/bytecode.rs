@@ -379,6 +379,12 @@ struct ClassEnvironmentPlan {
 }
 
 #[derive(Clone, Debug)]
+struct IterationEnvironmentPlan {
+    scope: ScopeId,
+    slots: Vec<CapturedSlot>,
+}
+
+#[derive(Clone, Debug)]
 struct PrivateNameSlot {
     id: crate::hir::HirPrivateNameId,
     name: std::sync::Arc<str>,
@@ -391,6 +397,7 @@ struct EnvironmentPlans {
     entry_slots: Vec<CapturedSlot>,
     functions: Vec<FunctionEnvironmentPlan>,
     classes: Vec<ClassEnvironmentPlan>,
+    iterations: Vec<IterationEnvironmentPlan>,
     global_lexicals: Vec<GlobalLexicalPlan>,
     function_self_bindings: Vec<BindingId>,
     scopes: std::sync::Arc<[crate::HirScope]>,
@@ -402,6 +409,13 @@ struct GlobalLexicalPlan {
     name: std::sync::Arc<str>,
     mutable: bool,
     span: SourceSpan,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EnvironmentStorageKind {
+    Activation,
+    Class,
+    Lexical,
 }
 
 impl EnvironmentPlans {
@@ -455,6 +469,15 @@ impl EnvironmentPlans {
             }
         }
         let class_environments = class_environment::collect(hir);
+        let mut iterations = Vec::new();
+        collect_iteration_environments(hir.statements(), &mut iterations)?;
+        for function in hir.functions() {
+            collect_iteration_environments(&function.body, &mut iterations)?;
+        }
+        let iteration_bindings = iterations
+            .iter()
+            .flat_map(|environment| environment.slots.iter().map(|slot| slot.id))
+            .collect::<Vec<_>>();
         let mut forced_captures = field_initializer::forced_captures(hir);
         forced_captures.retain(|binding| {
             !class_environments.iter().any(|class| {
@@ -475,6 +498,7 @@ impl EnvironmentPlans {
             Some(hir.root_scope()),
             &mut entry_slots,
         )?;
+        entry_slots.retain(|slot| !iteration_bindings.contains(&slot.id));
         let mut functions = Vec::with_capacity(hir.functions().len());
         let mut function_self_bindings = Vec::with_capacity(hir.functions().len());
         for function in hir.functions() {
@@ -560,6 +584,7 @@ impl EnvironmentPlans {
                 None,
                 &mut slots,
             )?;
+            slots.retain(|slot| !iteration_bindings.contains(&slot.id));
             functions.push(FunctionEnvironmentPlan {
                 scope: function.scope,
                 slots,
@@ -605,6 +630,7 @@ impl EnvironmentPlans {
             entry_slots,
             functions,
             classes,
+            iterations,
             global_lexicals,
             function_self_bindings,
             scopes: hir.scopes().into(),
@@ -632,6 +658,21 @@ impl EnvironmentPlans {
     }
 
     #[inline(always)]
+    fn iteration_environment(&self, scope: ScopeId) -> Option<&IterationEnvironmentPlan> {
+        self.iterations
+            .iter()
+            .find(|environment| environment.scope == scope)
+    }
+
+    #[inline(always)]
+    fn iteration_slot(&self, scope: ScopeId, binding: BindingId) -> Option<&CapturedSlot> {
+        self.iteration_environment(scope)?
+            .slots
+            .iter()
+            .find(|slot| slot.id == binding)
+    }
+
+    #[inline(always)]
     fn scopes_root(&self) -> ScopeId {
         self.root_scope
     }
@@ -647,7 +688,7 @@ impl EnvironmentPlans {
         &self,
         current_scope: ScopeId,
         binding: BindingId,
-    ) -> Option<(u32, &CapturedSlot, bool)> {
+    ) -> Option<(u32, &CapturedSlot, EnvironmentStorageKind)> {
         let mut cursor = if self.scope_has_environment(current_scope) {
             current_scope
         } else {
@@ -661,8 +702,16 @@ impl EnvironmentPlans {
                 return Some((
                     depth,
                     class.name.as_ref().expect("matched class-name binding"),
-                    true,
+                    EnvironmentStorageKind::Class,
                 ));
+            }
+            if let Some(slot) = self
+                .iterations
+                .iter()
+                .find(|environment| environment.scope == cursor)
+                .and_then(|environment| environment.slots.iter().find(|slot| slot.id == binding))
+            {
+                return Some((depth, slot, EnvironmentStorageKind::Lexical));
             }
             if let Some(slot) = self
                 .functions
@@ -670,14 +719,14 @@ impl EnvironmentPlans {
                 .find(|function| function.scope == cursor)
                 .and_then(|function| function.slots.iter().find(|slot| slot.id == binding))
             {
-                return Some((depth, slot, false));
+                return Some((depth, slot, EnvironmentStorageKind::Activation));
             }
             if let Some(slot) = self
                 .entry_slots
                 .iter()
                 .find(|slot| slot.id == binding && cursor == self.scopes_root())
             {
-                return Some((depth, slot, false));
+                return Some((depth, slot, EnvironmentStorageKind::Activation));
             }
             cursor = self.nearest_environment_parent(cursor)?;
             depth = depth.checked_add(1)?;
@@ -721,6 +770,10 @@ impl EnvironmentPlans {
                 .functions
                 .iter()
                 .any(|function| function.scope == scope && !function.slots.is_empty())
+            || self
+                .iterations
+                .iter()
+                .any(|environment| environment.scope == scope && !environment.slots.is_empty())
             || self.classes.iter().any(|class| class.scope == scope)
     }
 
@@ -886,6 +939,98 @@ fn collect_pattern_bindings(pattern: &crate::HirPattern, bindings: &mut Vec<crat
         }
         crate::HirPatternKind::Assignment(_) => {}
     }
+}
+
+/// Collects captured lexical for-in/of heads into independently allocated iteration records.
+fn collect_iteration_environments(
+    statements: &[HirStatement],
+    environments: &mut Vec<IterationEnvironmentPlan>,
+) -> Result<(), CompileError> {
+    for statement in statements {
+        match &statement.kind {
+            HirStatementKind::ForIn { left, body, .. }
+            | HirStatementKind::ForOf { left, body, .. } => {
+                if let HirForInLeft::Variable(declaration) = left
+                    && declaration.kind != HirVariableDeclarationKind::Var
+                {
+                    let mutable = declaration.kind == HirVariableDeclarationKind::Let;
+                    let declarator = declaration
+                        .declarators
+                        .first()
+                        .expect("HIR validates one loop-head declarator");
+                    let bindings = pattern_bindings(&declarator.pattern)
+                        .into_iter()
+                        .filter(|binding| binding.captured)
+                        .collect::<Vec<_>>();
+                    if let Some(scope) = bindings.first().map(|binding| binding.scope) {
+                        let mut slots = Vec::with_capacity(bindings.len());
+                        for binding in bindings {
+                            let slot = u32::try_from(slots.len())
+                                .map_err(|_| CompileError::BindingOverflow)?;
+                            slots.push(CapturedSlot {
+                                id: binding.id,
+                                slot,
+                                name: binding.name,
+                                mutable,
+                                initialized: false,
+                                parameter: false,
+                            });
+                        }
+                        environments.push(IterationEnvironmentPlan { scope, slots });
+                    }
+                }
+                collect_iteration_environments(core::slice::from_ref(body), environments)?;
+            }
+            HirStatementKind::Block(body) => {
+                collect_iteration_environments(body, environments)?;
+            }
+            HirStatementKind::Labeled { body, .. } | HirStatementKind::Loop { body, .. } => {
+                collect_iteration_environments(core::slice::from_ref(body), environments)?;
+            }
+            HirStatementKind::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                collect_iteration_environments(core::slice::from_ref(consequent), environments)?;
+                if let Some(alternate) = alternate {
+                    collect_iteration_environments(core::slice::from_ref(alternate), environments)?;
+                }
+            }
+            HirStatementKind::For { body, .. } => {
+                collect_iteration_environments(core::slice::from_ref(body), environments)?;
+            }
+            HirStatementKind::Switch { cases, .. } => {
+                for case in cases.iter() {
+                    collect_iteration_environments(&case.consequent, environments)?;
+                }
+            }
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                collect_iteration_environments(block, environments)?;
+                if let Some(handler) = handler {
+                    collect_iteration_environments(&handler.body, environments)?;
+                }
+                if let Some(finalizer) = finalizer {
+                    collect_iteration_environments(finalizer, environments)?;
+                }
+            }
+            HirStatementKind::Expression(_)
+            | HirStatementKind::VariableDeclaration(_)
+            | HirStatementKind::FunctionDeclaration(_)
+            | HirStatementKind::Return(_)
+            | HirStatementKind::Throw(_)
+            | HirStatementKind::Break
+            | HirStatementKind::Continue
+            | HirStatementKind::BreakLabeled(_)
+            | HirStatementKind::ContinueLabeled(_)
+            | HirStatementKind::Empty => {}
+        }
+    }
+    Ok(())
 }
 
 /// Walks activation-owned declarations while nested function bodies remain separate stencils.

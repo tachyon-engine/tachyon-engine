@@ -446,6 +446,11 @@ pub enum BindingLocation {
         depth: u32,
         slot: u32,
     },
+    /// A dynamically-entered block environment, including per-iteration loop bindings.
+    LexicalEnvironment {
+        depth: u32,
+        slot: u32,
+    },
     ModuleCell {
         slot: u32,
     },
@@ -942,7 +947,10 @@ impl CompiledModule {
                     else {
                         break;
                     };
-                    if instruction.opcode == Opcode::EnterClassEnvironment {
+                    if matches!(
+                        instruction.opcode,
+                        Opcode::EnterClassEnvironment | Opcode::EnterLexicalEnvironment
+                    ) {
                         maximum = maximum.max(instruction.operands[0]);
                     }
                     offset = offset.saturating_add(u32::from(instruction.word_len));

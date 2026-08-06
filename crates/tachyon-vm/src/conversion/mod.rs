@@ -576,6 +576,29 @@ impl Isolate {
                         let key = self.primitive_to_string_value(value)?;
                         return self.finish_intl_supported_values_of(continuation.site, key);
                     }
+                    if continuation.consumer == ConversionConsumer::IntlCollatorOption {
+                        let state = self.pending_intl_collator_reference(continuation.receiver)?;
+                        let string = self.primitive_to_string_value(value)?;
+                        return self.resume_intl_collator_option_string(
+                            continuation.site,
+                            state,
+                            string,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::IntlCollatorCompareLeft
+                            | ConversionConsumer::IntlCollatorCompareRight
+                    ) {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        let string = self.primitive_to_string_value(value)?;
+                        return self.resume_intl_collator_compare_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer == ConversionConsumer::IntlCollatorCompareLeft,
+                            string,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::AddLeft {
                         let left = value;
                         let right = continuation.receiver;
@@ -1610,6 +1633,15 @@ impl Isolate {
                 }
                 ConversionConsumer::StringFromCodesElement => {
                     unreachable!("String code conversion resumes inside its state machine")
+                }
+                ConversionConsumer::IntlCollatorOption => {
+                    unreachable!("Intl.Collator option conversion resumes inside its state machine")
+                }
+                ConversionConsumer::IntlCollatorCompareLeft
+                | ConversionConsumer::IntlCollatorCompareRight => {
+                    unreachable!(
+                        "Intl.Collator comparison conversion resumes inside its state machine"
+                    )
                 }
                 ConversionConsumer::MathArgument => {
                     unreachable!("Math conversion resumes inside its state machine")

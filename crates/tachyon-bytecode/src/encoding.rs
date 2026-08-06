@@ -187,9 +187,9 @@ pub enum Opcode {
     EnterFinally = 70,
     /// Restores and redispatches the completion owned by the active finalizer.
     ResumeCompletion = 71,
-    /// Transfers a break completion through finalizers crossed by its target.
+    /// Transfers break through crossed finalizers and restores its target lexical depth.
     BreakThroughFinally = 72,
-    /// Transfers a continue completion through finalizers crossed by its target.
+    /// Transfers continue through crossed finalizers and restores its target lexical depth.
     ContinueThroughFinally = 73,
     /// Prepares a computed key after checking that its base is coercible.
     ToPropertyKey = 74,
@@ -325,9 +325,15 @@ pub enum Opcode {
     ToString = 139,
     /// Applies prefix/postfix update arithmetic after ToNumeric.
     Update = 140,
+    /// Enters one block-scoped declarative environment with uniform slot mutability.
+    EnterLexicalEnvironment = 141,
+    /// Initializes one binding in the active block-scoped declarative environment.
+    InitializeLexicalEnvironment = 142,
+    /// Restores the lexical environment active before the block-scoped environment.
+    LeaveLexicalEnvironment = 143,
 }
 
-pub(super) const OPCODE_COUNT: usize = 141;
+pub(super) const OPCODE_COUNT: usize = 144;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -401,8 +407,8 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     1, // LoadArgumentsLength
     0, // EnterFinally
     0, // ResumeCompletion
-    1, // BreakThroughFinally
-    1, // ContinueThroughFinally
+    2, // BreakThroughFinally
+    2, // ContinueThroughFinally
     3, // ToPropertyKey
     3, // ToPropertyKeyForIn
     2, // SetFunctionName
@@ -470,10 +476,13 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     2, // SetObjectLiteralPrototype
     2, // ToString
     3, // Update
+    2, // EnterLexicalEnvironment
+    2, // InitializeLexicalEnvironment
+    0, // LeaveLexicalEnvironment
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::Update as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::LeaveLexicalEnvironment as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -660,6 +669,9 @@ impl Opcode {
             74 => Some(Self::SetObjectLiteralPrototype),
             75 => Some(Self::ToString),
             76 => Some(Self::Update),
+            77 => Some(Self::EnterLexicalEnvironment),
+            78 => Some(Self::InitializeLexicalEnvironment),
+            79 => Some(Self::LeaveLexicalEnvironment),
             _ => None,
         }
     }

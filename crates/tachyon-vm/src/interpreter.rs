@@ -1666,9 +1666,17 @@ impl Isolate {
             Opcode::EnterClassEnvironment => self.enter_class_environment(operands[0])?,
             Opcode::InitializeClassEnvironment => {
                 let value = self.read(base, operands[0])?;
-                self.initialize_class_environment(operands[1], value)?;
+                self.initialize_lexical_environment(operands[1], value)?;
             }
-            Opcode::LeaveClassEnvironment => self.leave_class_environment()?,
+            Opcode::LeaveClassEnvironment => self.leave_lexical_environment()?,
+            Opcode::EnterLexicalEnvironment => {
+                self.enter_lexical_environment(operands[0], operands[1] != 0)?;
+            }
+            Opcode::InitializeLexicalEnvironment => {
+                let value = self.read(base, operands[0])?;
+                self.initialize_lexical_environment(operands[1], value)?;
+            }
+            Opcode::LeaveLexicalEnvironment => self.leave_lexical_environment()?,
             Opcode::SetById => {
                 let receiver = self.read(base, operands[0])?;
                 let value = self.read(base, operands[1])?;
@@ -2207,13 +2215,17 @@ impl Isolate {
             }
             Opcode::BreakThroughFinally => {
                 return self.dispatch_abrupt(
-                    CompletionRecord::break_target(None, WordOffset::new(operands[0])),
+                    CompletionRecord::break_target(None, WordOffset::new(operands[0]), operands[1]),
                     instruction_offset,
                 );
             }
             Opcode::ContinueThroughFinally => {
                 return self.dispatch_abrupt(
-                    CompletionRecord::continue_target(None, WordOffset::new(operands[0])),
+                    CompletionRecord::continue_target(
+                        None,
+                        WordOffset::new(operands[0]),
+                        operands[1],
+                    ),
                     instruction_offset,
                 );
             }
@@ -2434,6 +2446,8 @@ impl Isolate {
                 } else if mode == PropertyCallbackMode::ArgumentList {
                     let state = self.pending_argument_list_reference(continuation.first())?;
                     self.pending_argument_list_source(state)?
+                } else if mode == PropertyCallbackMode::IntlCollator {
+                    continuation.second()
                 } else {
                     receiver
                 };
@@ -2637,6 +2651,7 @@ impl Isolate {
             NativeContinuationKind::IntlLocaleList(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::IntlCollator(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::TypedArrayCallback(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -3887,9 +3902,27 @@ impl Isolate {
 
     /// Enters one exact immutable environment for class name and private-name identities.
     fn enter_class_environment(&mut self, slot_count: u32) -> Result<(), ExecutionError> {
-        if self.fiber.class_environments.len() == self.fiber.class_environments.capacity() {
+        self.enter_declarative_environment(slot_count, false)
+    }
+
+    /// Enters one fresh per-iteration lexical environment with uniform declaration mutability.
+    fn enter_lexical_environment(
+        &mut self,
+        slot_count: u32,
+        mutable: bool,
+    ) -> Result<(), ExecutionError> {
+        self.enter_declarative_environment(slot_count, mutable)
+    }
+
+    /// Allocates and installs one sparse declarative environment above the active frame owner.
+    fn enter_declarative_environment(
+        &mut self,
+        slot_count: u32,
+        mutable: bool,
+    ) -> Result<(), ExecutionError> {
+        if self.fiber.lexical_environments.len() == self.fiber.lexical_environments.capacity() {
             self.fiber
-                .class_environments
+                .lexical_environments
                 .try_reserve_exact(1)
                 .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
         }
@@ -3901,7 +3934,7 @@ impl Isolate {
             parent,
             None,
             slot_count,
-            |_| BindingState::new(false, false),
+            |_| BindingState::new(mutable, false),
         )
         .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
         let roots = &mut VmRoots {
@@ -3931,12 +3964,12 @@ impl Isolate {
             .last_mut()
             .ok_or(ExecutionError::MissingEnvironment)?
             .environment = Some(environment);
-        self.fiber.class_environments.push(frame_depth);
+        self.fiber.lexical_environments.push(frame_depth);
         Ok(())
     }
 
-    /// Initializes one active class-environment slot and publishes its managed edge.
-    fn initialize_class_environment(
+    /// Initializes one active dynamic lexical-environment slot and publishes its managed edge.
+    fn initialize_lexical_environment(
         &mut self,
         slot: u32,
         value: Value,
@@ -3944,7 +3977,7 @@ impl Isolate {
         let frame_depth = self.fiber.frames.len();
         if !self
             .fiber
-            .class_environments
+            .lexical_environments
             .last()
             .is_some_and(|depth| *depth as usize == frame_depth)
         {
@@ -3968,12 +4001,12 @@ impl Isolate {
         Ok(())
     }
 
-    /// Restores the parent environment after one class expression finishes or unwinds.
-    fn leave_class_environment(&mut self) -> Result<(), ExecutionError> {
+    /// Restores the parent after one dynamic lexical environment finishes or unwinds.
+    fn leave_lexical_environment(&mut self) -> Result<(), ExecutionError> {
         let frame_depth = self.fiber.frames.len();
         if !self
             .fiber
-            .class_environments
+            .lexical_environments
             .last()
             .is_some_and(|depth| *depth as usize == frame_depth)
         {
@@ -3996,18 +4029,18 @@ impl Isolate {
         self.fiber
             .frames
             .last_mut()
-            .expect("class environment retains its frame")
+            .expect("lexical environment retains its frame")
             .environment = parent;
-        self.fiber.class_environments.pop();
+        self.fiber.lexical_environments.pop();
         Ok(())
     }
 
     /// Restores the lexical depth frozen into the selected same-frame exception handler.
-    fn restore_class_environment_depth(&mut self, target: u32) -> Result<(), ExecutionError> {
+    fn restore_lexical_environment_depth(&mut self, target: u32) -> Result<(), ExecutionError> {
         let frame_depth = self.fiber.frames.len();
         let mut current = self
             .fiber
-            .class_environments
+            .lexical_environments
             .iter()
             .rev()
             .take_while(|depth| **depth as usize == frame_depth)
@@ -4018,7 +4051,7 @@ impl Isolate {
             return Err(ExecutionError::MissingEnvironment);
         }
         while current > target {
-            self.leave_class_environment()?;
+            self.leave_lexical_environment()?;
             current -= 1;
         }
         Ok(())
@@ -4026,15 +4059,15 @@ impl Isolate {
 
     /// Drops sparse environment roots after their owning JavaScript frame leaves the fiber.
     #[inline(always)]
-    fn discard_exited_class_environments(&mut self) {
+    fn discard_exited_lexical_environments(&mut self) {
         let frame_depth = self.fiber.frames.len() as u32;
         while self
             .fiber
-            .class_environments
+            .lexical_environments
             .last()
             .is_some_and(|depth| *depth > frame_depth)
         {
-            self.fiber.class_environments.pop();
+            self.fiber.lexical_environments.pop();
         }
         while self
             .fiber
@@ -4305,7 +4338,7 @@ impl Isolate {
         self.fiber.argument_callees.clear();
         self.fiber.derived_activations.clear();
         self.fiber.base_class_activations.clear();
-        self.fiber.class_environments.clear();
+        self.fiber.lexical_environments.clear();
         self.fiber.eval_var_environments.clear();
         self.fiber.registers.clear();
         self.fiber.handlers.clear();
@@ -5391,6 +5424,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::IntlLocaleConstructor) => {
                     return self.create_intl_locale_from_site(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::IntlCollatorConstructor) => {
+                    return self.begin_intl_collator_constructor(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
                     let object = self.construct_object_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, object);
@@ -5779,11 +5815,11 @@ impl Isolate {
         let frame_depth = self.fiber.frames.len() as u32;
         while self
             .fiber
-            .class_environments
+            .lexical_environments
             .last()
             .is_some_and(|depth| *depth >= frame_depth)
         {
-            self.fiber.class_environments.pop();
+            self.fiber.lexical_environments.pop();
         }
         while self
             .fiber
@@ -7927,6 +7963,21 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::IntlSupportedValuesOf) => {
                     return self.begin_intl_supported_values_of(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::IntlCollatorConstructor) => {
+                    return self.begin_intl_collator_constructor(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlCollatorCompareGetter) => {
+                    return self.call_intl_collator_compare_getter(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlCollatorCompare) => {
+                    return self.begin_intl_collator_compare(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlCollatorResolvedOptions) => {
+                    return self.call_intl_collator_resolved_options(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlCollatorSupportedLocalesOf) => {
+                    return self.begin_intl_collator_supported_locales_of(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::IntlLocaleConstructor) => {
                     return self.create_intl_locale_from_site(&site);
                 }
@@ -8457,7 +8508,7 @@ impl Isolate {
             )
         {
             self.fiber.frames.pop();
-            self.discard_exited_class_environments();
+            self.discard_exited_lexical_environments();
             self.fiber.argument_objects.pop();
             self.fiber.argument_sources.pop();
             self.fiber.argument_callees.pop();
@@ -8579,7 +8630,7 @@ impl Isolate {
             .frames
             .pop()
             .expect("callee return always has an active frame");
-        self.discard_exited_class_environments();
+        self.discard_exited_lexical_environments();
         self.fiber
             .argument_objects
             .pop()
@@ -8677,7 +8728,11 @@ impl Isolate {
                     Some(value),
                 ),
                 NativeContinuationKind::PropertyGet(mode) => {
-                    if mode == PropertyCallbackMode::Descriptor {
+                    if mode == PropertyCallbackMode::IntlCollator {
+                        let state = self.pending_intl_collator_reference(continuation.first())?;
+                        let stage = self.pending_intl_collator_stage(state)?;
+                        self.resume_intl_collator(continuation, stage, value)
+                    } else if mode == PropertyCallbackMode::Descriptor {
                         let state =
                             self.pending_property_descriptor_reference(continuation.first())?;
                         self.write(
@@ -8804,6 +8859,9 @@ impl Isolate {
                 NativeContinuationKind::IntlLocaleList(stage) => {
                     let state = self.native_call_state_reference(continuation.first())?;
                     self.resume_intl_locale_list(site, state, stage, value)
+                }
+                NativeContinuationKind::IntlCollator(stage) => {
+                    self.resume_intl_collator(continuation, stage, value)
                 }
                 NativeContinuationKind::TypedArrayCallback(stage) => {
                     let state = self.native_call_state_reference(continuation.first())?;
@@ -9279,7 +9337,7 @@ impl Isolate {
             let handler = self.find_abrupt_handler(frame, instruction_offset, completion)?;
             self.discard_exited_finalizers(frame, instruction_offset, completion, handler)?;
             if let Some((index, handler)) = handler {
-                self.restore_class_environment_depth(handler.environment_depth)?;
+                self.restore_lexical_environment_depth(handler.environment_depth)?;
                 if handler.kind.is_finalizer() {
                     self.enter_finalizer(index, handler, completion)?;
                     return Ok(None);
@@ -9302,6 +9360,7 @@ impl Isolate {
                     let target = completion
                         .target()
                         .ok_or(ExecutionError::MissingCompletionRecord)?;
+                    self.restore_lexical_environment_depth(completion.target_environment_depth())?;
                     self.set_pc(target);
                     return Ok(None);
                 }
@@ -9336,7 +9395,7 @@ impl Isolate {
                 .frames
                 .pop()
                 .expect("non-entry abrupt completion retains a callee frame");
-            self.discard_exited_class_environments();
+            self.discard_exited_lexical_environments();
             self.fiber
                 .argument_objects
                 .pop()

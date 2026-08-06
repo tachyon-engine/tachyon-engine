@@ -1,11 +1,14 @@
 //! Ordinary-object shapes and exactly accounted contiguous property storage.
 
-use core::mem::size_of;
+use core::mem::{size_of, size_of_val};
 use std::sync::{Arc, Mutex};
 use tachyon_gc::{GcExternalMemory, GcRef, Trace, Tracer};
 use tachyon_value::{RawHeapRef, Value};
 
-use crate::{AtomId, CodeId, tuning::objects};
+use crate::{
+    AtomId, CodeId, IntlCollatorBackend, IntlCollatorCaseFirst, IntlCollatorSensitivity,
+    IntlCollatorUsage, tuning::objects,
+};
 use tachyon_bytecode::FunctionId;
 
 /// Stable isolate-local identity for one Symbol property key.
@@ -639,6 +642,60 @@ pub(crate) struct SymbolObject {
 pub(crate) struct DateObject {
     pub(crate) date_value: f64,
     pub(crate) ordinary: OrdinaryObject,
+}
+
+/// Resolved scalar slots passed across the host/backend allocation boundary as one compact unit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct IntlCollatorResolvedOptions {
+    pub(crate) usage: IntlCollatorUsage,
+    pub(crate) sensitivity: IntlCollatorSensitivity,
+    pub(crate) case_first: IntlCollatorCaseFirst,
+    pub(crate) ignore_punctuation: bool,
+    pub(crate) numeric: bool,
+}
+
+/// Host-backed comparator payload with no isolate-local JavaScript edges.
+pub(crate) struct IntlCollatorBackendPayload {
+    pub(crate) backend: Box<dyn IntlCollatorBackend>,
+}
+
+impl Trace for IntlCollatorBackendPayload {
+    #[inline(always)]
+    fn trace(&mut self, _tracer: &mut dyn Tracer) {}
+}
+
+impl GcExternalMemory for IntlCollatorBackendPayload {
+    #[inline(always)]
+    fn external_memory_bytes(&self) -> usize {
+        size_of_val(&*self.backend).saturating_add(self.backend.external_memory_bytes())
+    }
+}
+
+/// Branded `Intl.Collator` object with resolved slots and a lazily cached bound comparator.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub(crate) struct IntlCollatorObject {
+    pub(crate) ordinary: OrdinaryObject,
+    pub(crate) backend: GcRef<IntlCollatorBackendPayload>,
+    pub(crate) locale: Value,
+    pub(crate) collation: Value,
+    pub(crate) cached_bound_compare: Value,
+    pub(crate) usage: IntlCollatorUsage,
+    pub(crate) sensitivity: IntlCollatorSensitivity,
+    pub(crate) case_first: IntlCollatorCaseFirst,
+    pub(crate) ignore_punctuation: bool,
+    pub(crate) numeric: bool,
+}
+
+impl Trace for IntlCollatorObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.ordinary.trace(tracer);
+        self.backend.trace(tracer);
+        self.locale.trace(tracer);
+        self.collation.trace(tracer);
+        self.cached_bound_compare.trace(tracer);
+    }
 }
 
 /// Externally-accounted byte storage shared by ArrayBuffer views in one isolate.

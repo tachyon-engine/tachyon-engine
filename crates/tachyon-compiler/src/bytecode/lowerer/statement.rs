@@ -266,10 +266,26 @@ impl Lowerer<'_> {
         span: SourceSpan,
     ) -> Result<(), CompileError> {
         let checkpoint = self.locals.len();
-        let (condition, end) = self.for_in_prelude(left, right, span)?;
-        let targets = self.push_loop_control_targets(self.control_target(end), condition);
+        let (condition, end, iteration) = self.for_in_prelude(left, right, span)?;
+        let cleanup = iteration
+            .map(|_| self.builder.new_label().map_err(CompileError::Builder))
+            .transpose()?
+            .unwrap_or(condition);
+        let outer_environment_depth = self
+            .environment_depth
+            .checked_sub(u32::from(iteration.is_some()))
+            .ok_or(CompileError::BindingOverflow)?;
+        let break_target =
+            self.control_target_at_depth(end, self.finally_depth, outer_environment_depth);
+        let targets = self.push_loop_control_targets(break_target, cleanup);
         self.entry_statement(body, result)?;
         self.pop_loop_control_targets(targets);
+        if let Some(iteration) = iteration {
+            self.builder
+                .bind_label(cleanup)
+                .map_err(CompileError::Builder)?;
+            self.leave_iteration_environment(iteration, span)?;
+        }
         self.emit_jump(condition, span)?;
         self.builder
             .bind_label(end)
@@ -540,10 +556,26 @@ impl Lowerer<'_> {
         span: SourceSpan,
     ) -> Result<(), CompileError> {
         let checkpoint = self.locals.len();
-        let (condition, end) = self.for_in_prelude(left, right, span)?;
-        let targets = self.push_loop_control_targets(self.control_target(end), condition);
+        let (condition, end, iteration) = self.for_in_prelude(left, right, span)?;
+        let cleanup = iteration
+            .map(|_| self.builder.new_label().map_err(CompileError::Builder))
+            .transpose()?
+            .unwrap_or(condition);
+        let outer_environment_depth = self
+            .environment_depth
+            .checked_sub(u32::from(iteration.is_some()))
+            .ok_or(CompileError::BindingOverflow)?;
+        let break_target =
+            self.control_target_at_depth(end, self.finally_depth, outer_environment_depth);
+        let targets = self.push_loop_control_targets(break_target, cleanup);
         self.function_statement(body)?;
         self.pop_loop_control_targets(targets);
+        if let Some(iteration) = iteration {
+            self.builder
+                .bind_label(cleanup)
+                .map_err(CompileError::Builder)?;
+            self.leave_iteration_environment(iteration, span)?;
+        }
         self.emit_jump(condition, span)?;
         self.builder
             .bind_label(end)
@@ -562,14 +594,35 @@ impl Lowerer<'_> {
         span: SourceSpan,
     ) -> Result<(), CompileError> {
         let checkpoint = self.locals.len();
-        let (iterator, condition, natural_end, end, finally_slot, protected_start) =
-            self.for_of_prelude(left, right, span)?;
-        let targets = self.push_loop_control_targets(
-            self.control_target_at_depth(end, self.finally_depth - 1),
+        let ForOfPrelude {
+            iterator,
             condition,
+            natural_end,
+            end,
+            finally_slot,
+            protected_start,
+            iteration,
+        } = self.for_of_prelude(left, right, span)?;
+        let cleanup = iteration
+            .map(|_| self.builder.new_label().map_err(CompileError::Builder))
+            .transpose()?
+            .unwrap_or(condition);
+        let outer_environment_depth = self
+            .environment_depth
+            .checked_sub(u32::from(iteration.is_some()))
+            .ok_or(CompileError::BindingOverflow)?;
+        let targets = self.push_loop_control_targets(
+            self.control_target_at_depth(end, self.finally_depth - 1, outer_environment_depth),
+            cleanup,
         );
         self.entry_statement(body, result)?;
         self.pop_loop_control_targets(targets);
+        if let Some(iteration) = iteration {
+            self.builder
+                .bind_label(cleanup)
+                .map_err(CompileError::Builder)?;
+            self.leave_iteration_environment(iteration, span)?;
+        }
         self.emit_jump(condition, span)?;
         self.builder
             .bind_label(natural_end)
@@ -603,14 +656,35 @@ impl Lowerer<'_> {
         span: SourceSpan,
     ) -> Result<(), CompileError> {
         let checkpoint = self.locals.len();
-        let (iterator, condition, natural_end, end, finally_slot, protected_start) =
-            self.for_of_prelude(left, right, span)?;
-        let targets = self.push_loop_control_targets(
-            self.control_target_at_depth(end, self.finally_depth - 1),
+        let ForOfPrelude {
+            iterator,
             condition,
+            natural_end,
+            end,
+            finally_slot,
+            protected_start,
+            iteration,
+        } = self.for_of_prelude(left, right, span)?;
+        let cleanup = iteration
+            .map(|_| self.builder.new_label().map_err(CompileError::Builder))
+            .transpose()?
+            .unwrap_or(condition);
+        let outer_environment_depth = self
+            .environment_depth
+            .checked_sub(u32::from(iteration.is_some()))
+            .ok_or(CompileError::BindingOverflow)?;
+        let targets = self.push_loop_control_targets(
+            self.control_target_at_depth(end, self.finally_depth - 1, outer_environment_depth),
+            cleanup,
         );
         self.function_statement(body)?;
         self.pop_loop_control_targets(targets);
+        if let Some(iteration) = iteration {
+            self.builder
+                .bind_label(cleanup)
+                .map_err(CompileError::Builder)?;
+            self.leave_iteration_environment(iteration, span)?;
+        }
         self.emit_jump(condition, span)?;
         self.builder
             .bind_label(natural_end)
@@ -692,10 +766,18 @@ impl Lowerer<'_> {
             span,
         )?;
         let protected_start = self.emit_marker(span)?;
-        self.store_for_in_left(left, value, span)?;
+        let iteration = self.store_for_in_left(left, value, span)?;
+        let cleanup = iteration
+            .map(|_| self.builder.new_label().map_err(CompileError::Builder))
+            .transpose()?
+            .unwrap_or(condition);
+        let outer_environment_depth = self
+            .environment_depth
+            .checked_sub(u32::from(iteration.is_some()))
+            .ok_or(CompileError::BindingOverflow)?;
         let targets = self.push_loop_control_targets(
-            self.control_target_at_depth(end, self.finally_depth - 1),
-            condition,
+            self.control_target_at_depth(end, self.finally_depth - 1, outer_environment_depth),
+            cleanup,
         );
         if let Some(result) = entry_result {
             self.entry_statement(body, result)?;
@@ -703,6 +785,12 @@ impl Lowerer<'_> {
             self.function_statement(body)?;
         }
         self.pop_loop_control_targets(targets);
+        if let Some(iteration) = iteration {
+            self.builder
+                .bind_label(cleanup)
+                .map_err(CompileError::Builder)?;
+            self.leave_iteration_environment(iteration, span)?;
+        }
         self.emit_jump(condition, span)?;
         self.builder
             .bind_label(natural_end)
@@ -733,17 +821,7 @@ impl Lowerer<'_> {
         left: &HirForInLeft,
         right: &HirExpression,
         span: SourceSpan,
-    ) -> Result<
-        (
-            IteratorRegisters,
-            Label,
-            Label,
-            Label,
-            usize,
-            tachyon_bytecode::WordOffset,
-        ),
-        CompileError,
-    > {
+    ) -> Result<ForOfPrelude, CompileError> {
         let source = self.expression(right)?;
         let iterator = self.get_sync_iterator(source, span)?;
         self.prepare_for_in_binding(left, span)?;
@@ -777,15 +855,16 @@ impl Lowerer<'_> {
             &crate::HirObjectPropertyKey::Static("value".into()),
             span,
         )?;
-        self.store_for_in_left(left, value, span)?;
-        Ok((
+        let iteration = self.store_for_in_left(left, value, span)?;
+        Ok(ForOfPrelude {
             iterator,
             condition,
             natural_end,
             end,
             finally_slot,
             protected_start,
-        ))
+            iteration,
+        })
     }
 
     /// Evaluates the source once, advances the iterator, checks completion, and stores each key.
@@ -794,7 +873,7 @@ impl Lowerer<'_> {
         left: &HirForInLeft,
         right: &HirExpression,
         span: SourceSpan,
-    ) -> Result<(Label, Label), CompileError> {
+    ) -> Result<(Label, Label, Option<IterationEnvironmentState>), CompileError> {
         let source = self.expression(right)?;
         let iterator = self.register()?;
         self.emit(
@@ -827,8 +906,8 @@ impl Lowerer<'_> {
                 },
             )
             .map_err(CompileError::Builder)?;
-        self.store_for_in_left(left, key, span)?;
-        Ok((condition, end))
+        let iteration = self.store_for_in_left(left, key, span)?;
+        Ok((condition, end, iteration))
     }
 
     /// Publishes one lexical head binding before its repeated internal initialization.
@@ -847,6 +926,12 @@ impl Lowerer<'_> {
             .declarators
             .first()
             .expect("HIR validates one for-in declarator");
+        if self
+            .iteration_environment_for_pattern(&declarator.pattern)
+            .is_some()
+        {
+            return Ok(());
+        }
         self.prepare_for_in_pattern(
             &declarator.pattern,
             declaration.kind == HirVariableDeclarationKind::Let,
@@ -895,17 +980,62 @@ impl Lowerer<'_> {
         left: &HirForInLeft,
         value: RegisterId,
         span: SourceSpan,
-    ) -> Result<(), CompileError> {
+    ) -> Result<Option<IterationEnvironmentState>, CompileError> {
         match left {
-            HirForInLeft::Assignment(pattern) => self.assign_pattern(pattern, value, span),
+            HirForInLeft::Assignment(pattern) => {
+                self.assign_pattern(pattern, value, span)?;
+                Ok(None)
+            }
             HirForInLeft::Variable(declaration) => {
                 let declarator = declaration
                     .declarators
                     .first()
                     .expect("HIR validates one for-in declarator");
-                self.initialize_declared_pattern(&declarator.pattern, value)
+                if let Some((scope, slot_count)) =
+                    self.iteration_environment_for_pattern(&declarator.pattern)
+                {
+                    let mutable = declaration.kind == HirVariableDeclarationKind::Let;
+                    self.emit(
+                        Opcode::EnterLexicalEnvironment,
+                        &[slot_count, u32::from(mutable)],
+                        span,
+                    )?;
+                    self.environment_depth = self
+                        .environment_depth
+                        .checked_add(1)
+                        .ok_or(CompileError::BindingOverflow)?;
+                    let previous_scope = self.active_scope;
+                    self.active_scope = scope;
+                    self.bind_pattern(&declarator.pattern, value, mutable)?;
+                    return Ok(Some(IterationEnvironmentState { previous_scope }));
+                }
+                self.initialize_declared_pattern(&declarator.pattern, value)?;
+                Ok(None)
             }
         }
+    }
+
+    /// Leaves one compiler-tracked iteration record after normal or continue completion.
+    fn leave_iteration_environment(
+        &mut self,
+        state: IterationEnvironmentState,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        self.emit(Opcode::LeaveLexicalEnvironment, &[], span)?;
+        self.environment_depth = self
+            .environment_depth
+            .checked_sub(1)
+            .ok_or(CompileError::BindingOverflow)?;
+        self.active_scope = state.previous_scope;
+        Ok(())
+    }
+
+    /// Returns the dynamic iteration record selected by the first binding's lexical scope.
+    fn iteration_environment_for_pattern(&self, pattern: &HirPattern) -> Option<(ScopeId, u32)> {
+        let scope = first_pattern_scope(pattern)?;
+        let environment = self.environments.iteration_environment(scope)?;
+        let slot_count = u32::try_from(environment.slots.len()).ok()?;
+        Some((scope, slot_count))
     }
 
     /// Evaluates a member reference once per iteration and stores an already computed key value.
@@ -1620,5 +1750,23 @@ fn directly_labels_iteration(statement: &HirStatement) -> bool {
         | HirStatementKind::ForOf { .. }
         | HirStatementKind::Loop { .. } => true,
         _ => false,
+    }
+}
+
+/// Finds the lexical scope shared by every declaration leaf in one binding pattern.
+fn first_pattern_scope(pattern: &HirPattern) -> Option<ScopeId> {
+    match &pattern.kind {
+        HirPatternKind::Binding(binding) => Some(binding.scope),
+        HirPatternKind::Default { target, .. } => first_pattern_scope(target),
+        HirPatternKind::Array { elements, rest } => elements
+            .iter()
+            .flatten()
+            .find_map(first_pattern_scope)
+            .or_else(|| rest.as_deref().and_then(first_pattern_scope)),
+        HirPatternKind::Object { properties, rest } => properties
+            .iter()
+            .find_map(|property| first_pattern_scope(&property.target))
+            .or_else(|| rest.as_deref().and_then(first_pattern_scope)),
+        HirPatternKind::Assignment(_) => None,
     }
 }
