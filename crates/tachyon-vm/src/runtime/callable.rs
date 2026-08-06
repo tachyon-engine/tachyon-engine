@@ -2750,6 +2750,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::DetachedArrayBuffer
         | ExecutionError::FixedLengthSharedArrayBuffer
         | ExecutionError::OutOfBoundsTypedArray
+        | ExecutionError::OutOfBoundsDataView
         | ExecutionError::RegExpMatchAllRequiresGlobal => Some(NativeErrorKind::Type),
         ExecutionError::GlobalLexicalRedeclaration(_)
         | ExecutionError::GlobalLexicalAlreadyInitialized(_)

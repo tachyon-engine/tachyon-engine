@@ -607,6 +607,7 @@ pub enum ExecutionError {
     DetachedArrayBuffer,
     FixedLengthSharedArrayBuffer,
     OutOfBoundsTypedArray,
+    OutOfBoundsDataView,
     TypedArraySetAllocationFailed,
     OwnPropertyKeyAllocationFailed,
     ForInKeyAllocationFailed,

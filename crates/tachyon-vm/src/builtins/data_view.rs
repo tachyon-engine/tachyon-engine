@@ -244,30 +244,21 @@ impl Isolate {
             Err(error) => return Err(error),
         };
         if length_mode == ViewLengthMode::Tracking {
-            let byte_length = current.saturating_sub(byte_offset);
+            if byte_offset > current {
+                return Err(ExecutionError::OutOfBoundsDataView);
+            }
+            let byte_length = current - byte_offset;
             return Ok(DataViewSnapshot {
                 buffer,
-                byte_offset: if byte_offset > current {
-                    0
-                } else {
-                    byte_offset
-                },
-                byte_length: if byte_offset > current {
-                    0
-                } else {
-                    byte_length
-                },
+                byte_offset,
+                byte_length,
             });
         }
         if byte_offset
             .checked_add(encoded_length as usize)
             .is_none_or(|end| end > current)
         {
-            return Ok(DataViewSnapshot {
-                buffer,
-                byte_offset: 0,
-                byte_length: 0,
-            });
+            return Err(ExecutionError::OutOfBoundsDataView);
         }
         Ok(DataViewSnapshot {
             buffer,
