@@ -27,6 +27,20 @@ const observed = new Intl.DateTimeFormat("en-US", new Proxy({
 }));
 const observedResolved = observed.resolvedOptions();
 const supported = Intl.DateTimeFormat.supportedLocalesOf(["en-US", "zxx"]);
+const legacyReceiver = Object.create(Intl.DateTimeFormat.prototype);
+const legacy = Intl.DateTimeFormat.call(legacyReceiver, "en-US", { year: "numeric" });
+const legacySymbol = Object.getOwnPropertySymbols(legacy)[0];
+const legacyDescriptor = Object.getOwnPropertyDescriptor(legacy, legacySymbol);
+const legacyResolved = legacy.resolvedOptions();
+const legacyFormat = legacy.format;
+let seenLegacySymbol;
+const legacyProxy = new Proxy(legacy, {
+  get(target, key) {
+    seenLegacySymbol = key;
+    return target[key];
+  }
+});
+const proxyResolved = Intl.DateTimeFormat.prototype.resolvedOptions.call(legacyProxy);
 resolved.locale === "en-US" && resolved.calendar === "gregory" &&
 resolved.numberingSystem === "latn" && resolved.timeZone === "UTC" &&
 resolved.year === "numeric" && resolved.month === "2-digit" &&
@@ -39,7 +53,12 @@ rangeParts[0].type === "month" && rangeParts[0].source === "shared" &&
 rangeParts[4].value === "1970" && rangeParts[4].source === "shared" &&
 optionGets === 20 && observedResolved.year === "numeric" &&
 observedResolved.fractionalSecondDigits === 2 &&
-supported.length === 1 && supported[0] === "en-US"
+supported.length === 1 && supported[0] === "en-US" && legacy === legacyReceiver &&
+legacySymbol.description === "IntlLegacyConstructedSymbol" &&
+legacyDescriptor.writable === false && legacyDescriptor.enumerable === false &&
+legacyDescriptor.configurable === false && legacyResolved.year === "numeric" &&
+legacyFormat(0) === "01/01/1970" && proxyResolved.year === "numeric" &&
+seenLegacySymbol === legacySymbol
 "#;
 
 struct TestDateTimeBackend;

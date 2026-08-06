@@ -9,6 +9,7 @@ const UNDEFINED: Value = Value::from_immediate(Immediate::Undefined);
 #[derive(Clone, Debug)]
 pub(crate) struct PendingIntlDateTimeFormat {
     new_target: Value,
+    legacy_receiver: Value,
     options: Value,
     locales: Value,
     calendar: Value,
@@ -25,6 +26,7 @@ impl Trace for PendingIntlDateTimeFormat {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.new_target.trace(tracer);
+        self.legacy_receiver.trace(tracer);
         self.options.trace(tracer);
         self.locales.trace(tracer);
         self.calendar.trace(tracer);
@@ -50,6 +52,7 @@ impl PendingIntlDateTimeFormat {
     fn new(new_target: Value, options: Value, locales: Value) -> Self {
         Self {
             new_target,
+            legacy_receiver: UNDEFINED,
             options,
             locales,
             calendar: UNDEFINED,
@@ -72,10 +75,11 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let locales = self.call_argument(site, 0)?.unwrap_or(UNDEFINED);
         let options = self.call_argument(site, 1)?.unwrap_or(UNDEFINED);
-        let new_target = if self.is_object_value(site.new_target) {
-            site.new_target
-        } else {
+        let called_without_new = !self.is_object_value(site.new_target);
+        let new_target = if called_without_new {
             site.callee
+        } else {
+            site.new_target
         };
         let locales = self.intl_date_time_locale_list(locales)?;
         let locales = self.materialize_intl_date_time_locale_list(locales)?;
@@ -84,9 +88,11 @@ impl Isolate {
         } else {
             self.coerce_to_object(options)?
         };
-        let state = self.allocate_pending_intl_date_time_format(PendingIntlDateTimeFormat::new(
-            new_target, options, locales,
-        ))?;
+        let mut pending = PendingIntlDateTimeFormat::new(new_target, options, locales);
+        if called_without_new {
+            pending.legacy_receiver = site.this_value;
+        }
+        let state = self.allocate_pending_intl_date_time_format(pending)?;
         if options == UNDEFINED {
             return self.finish_pending_intl_date_time_format(Self::native_site(site), state);
         }
@@ -352,7 +358,12 @@ impl Isolate {
                 .unwrap_or_default(),
             options: snapshot.fields,
         };
-        self.finish_intl_date_time_format_constructor(site, snapshot.new_target, request)
+        self.finish_intl_date_time_format_constructor(
+            site,
+            snapshot.new_target,
+            snapshot.legacy_receiver,
+            request,
+        )
     }
 
     /// Stores canonical locale strings in a private intrinsic Array rooted across option callbacks.

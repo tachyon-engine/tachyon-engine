@@ -2670,6 +2670,9 @@ impl Isolate {
             NativeContinuationKind::IntlCollator(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::IntlNumberFormat(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::IntlDateTimeFormat(_) => (continuation.second(), 0, None, 0),
+            NativeContinuationKind::IntlDateTimeFormatLegacy(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::IntlNumberFormatLegacy(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -9000,6 +9003,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::IntlDateTimeFormat(stage) => {
                     self.resume_pending_intl_date_time_format(continuation, stage, value)
+                }
+                NativeContinuationKind::IntlDateTimeFormatLegacy(stage) => {
+                    self.resume_intl_date_time_format_legacy(continuation, stage, value)
                 }
                 NativeContinuationKind::IntlNumberFormatLegacy(stage) => {
                     self.resume_intl_number_format_legacy(continuation, stage, value)

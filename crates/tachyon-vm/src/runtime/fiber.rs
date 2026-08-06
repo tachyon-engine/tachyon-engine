@@ -1837,6 +1837,18 @@ pub(crate) enum IntlNumberFormatLegacyStage {
     ResolvedOptionsFallbackGet,
 }
 
+/// Observable legacy-constructor and UnwrapDateTimeFormat boundaries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum IntlDateTimeFormatLegacyStage {
+    ChainHasInstance,
+    ChainDefine,
+    FormatHasInstance,
+    FormatFallbackGet,
+    ResolvedOptionsHasInstance,
+    ResolvedOptionsFallbackGet,
+}
+
 /// Observable boundaries in the Async-from-Sync iterator algorithms.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1965,6 +1977,7 @@ pub(crate) enum NativeContinuationKind {
     IntlCollator(IntlCollatorStage),
     IntlNumberFormat(IntlNumberFormatStage),
     IntlDateTimeFormat(IntlDateTimeFormatStage),
+    IntlDateTimeFormatLegacy(IntlDateTimeFormatLegacyStage),
     IntlNumberFormatLegacy(IntlNumberFormatLegacyStage),
     JsonStringify(JsonStringifyStage),
     JsonParseReviver,
@@ -2034,6 +2047,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::IntlNumberFormatLegacy(stage),
+            first,
+            second,
+        }
+    }
+
+    /// Roots legacy DateTimeFormat receiver state across instanceof and fallback Get.
+    #[inline]
+    pub(crate) const fn intl_date_time_format_legacy(
+        site: NativeContinuationSite,
+        stage: IntlDateTimeFormatLegacyStage,
+        first: Value,
+        second: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::IntlDateTimeFormatLegacy(stage),
             first,
             second,
         }

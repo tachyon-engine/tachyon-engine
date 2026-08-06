@@ -1,9 +1,11 @@
 //! Provider-backed `Intl.DateTimeFormat` branded surface and initial option pipeline.
 
 use super::super::*;
+use crate::runtime::fiber::IntlDateTimeFormatLegacyStage;
 
 mod options;
 pub(crate) use options::PendingIntlDateTimeFormat;
+mod legacy;
 
 const MAX_TIME_VALUE: f64 = 8.64e15;
 
@@ -46,6 +48,7 @@ impl Isolate {
         &mut self,
         site: NativeContinuationSite,
         new_target: Value,
+        legacy_receiver: Value,
         mut request: IntlDateTimeFormatRequest,
     ) -> Result<(), ExecutionError> {
         let default_time_zone = self
@@ -86,7 +89,12 @@ impl Isolate {
             prototype,
             AllocationSpace::Young,
         )?;
-        self.write(site.caller_base, site.destination, formatter)
+        if legacy_receiver.as_immediate() == Some(Immediate::Undefined)
+            || !self.is_object_value(legacy_receiver)
+        {
+            return self.write(site.caller_base, site.destination, formatter);
+        }
+        self.begin_intl_date_time_format_chain(site, legacy_receiver, formatter)
     }
 
     /// Filters the synchronously canonicalized locale list through provider capability data.
@@ -130,7 +138,26 @@ impl Isolate {
         &mut self,
         site: &CallSite,
     ) -> Result<(), ExecutionError> {
-        let formatter = self.intl_date_time_format_reference(site.this_value)?;
+        if self
+            .intl_date_time_format_reference_if_branded(site.this_value)
+            .is_none()
+        {
+            return self.begin_intl_date_time_format_unwrap(
+                Self::native_site(site),
+                IntlDateTimeFormatLegacyStage::FormatHasInstance,
+                site.this_value,
+            );
+        }
+        self.finish_intl_date_time_format_format_getter(Self::native_site(site), site.this_value)
+    }
+
+    /// Returns or creates the cached bound formatter for an already-unwrapped receiver.
+    fn finish_intl_date_time_format_format_getter(
+        &mut self,
+        site: NativeContinuationSite,
+        formatter_value: Value,
+    ) -> Result<(), ExecutionError> {
+        let formatter = self.intl_date_time_format_reference(formatter_value)?;
         let snapshot = self.intl_date_time_format_snapshot(formatter)?;
         if snapshot.cached_bound_format.as_immediate() != Some(Immediate::Undefined) {
             return self.write(
@@ -139,7 +166,7 @@ impl Isolate {
                 snapshot.cached_bound_format,
             );
         }
-        let format = self.allocate_intl_date_time_format_bound(site.this_value)?;
+        let format = self.allocate_intl_date_time_format_bound(formatter_value)?;
         self.set_intl_date_time_format_bound(formatter, format)?;
         self.write(site.caller_base, site.destination, format)
     }
@@ -219,7 +246,26 @@ impl Isolate {
         &mut self,
         site: &CallSite,
     ) -> Result<(), ExecutionError> {
-        let formatter = self.intl_date_time_format_reference(site.this_value)?;
+        if self
+            .intl_date_time_format_reference_if_branded(site.this_value)
+            .is_none()
+        {
+            return self.begin_intl_date_time_format_unwrap(
+                Self::native_site(site),
+                IntlDateTimeFormatLegacyStage::ResolvedOptionsHasInstance,
+                site.this_value,
+            );
+        }
+        self.finish_intl_date_time_format_resolved_options(Self::native_site(site), site.this_value)
+    }
+
+    /// Publishes resolved options for an already-unwrapped DateTimeFormat receiver.
+    fn finish_intl_date_time_format_resolved_options(
+        &mut self,
+        site: NativeContinuationSite,
+        formatter_value: Value,
+    ) -> Result<(), ExecutionError> {
+        let formatter = self.intl_date_time_format_reference(formatter_value)?;
         let resolved = self.intl_date_time_format_resolved(formatter)?;
         let result = self.create_ordinary_object()?;
         self.write(site.caller_base, site.destination, result)?;
@@ -378,15 +424,21 @@ impl Isolate {
         &self,
         value: Value,
     ) -> Result<GcRef<IntlDateTimeFormatObject>, ExecutionError> {
-        let raw =
-            value
-                .as_heap_ref()
-                .ok_or(ExecutionError::IncompatibleIntlDateTimeFormatReceiver(
-                    value,
-                ))?;
+        self.intl_date_time_format_reference_if_branded(value)
+            .ok_or(ExecutionError::IncompatibleIntlDateTimeFormatReceiver(
+                value,
+            ))
+    }
+
+    /// Returns the internal brand only for a direct DateTimeFormat object.
+    fn intl_date_time_format_reference_if_branded(
+        &self,
+        value: Value,
+    ) -> Option<GcRef<IntlDateTimeFormatObject>> {
+        let raw = value.as_heap_ref()?;
         self.heap
             .checked_reference(raw, self.types.intl_date_time_format_object)
-            .map_err(|_| ExecutionError::IncompatibleIntlDateTimeFormatReceiver(value))
+            .ok()
     }
 
     fn intl_date_time_format_snapshot(
