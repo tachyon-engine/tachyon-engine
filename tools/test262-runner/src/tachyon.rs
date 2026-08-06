@@ -5,7 +5,7 @@ use std::{
     pin::Pin,
     sync::{Arc, Condvar, Mutex, mpsc},
     task::{Context, Wake, Waker},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tachyon_compiler::{
@@ -36,6 +36,9 @@ const EXECUTION_FUEL_LIMIT: u64 = 20_000_000;
 // every configured module while keeping a live-but-nonterminating job graph bounded independently
 // from bytecode instruction fuel.
 const MODULE_TRANSITION_LIMIT: u32 = MAX_LOADED_MODULES * 16;
+// Keep Promise polling cooperative with host-backed waits. Test262's setTimeout fallback uses
+// a self-rescheduling microtask, so an unbounded quantum would starve Atomics.waitAsync wakeups.
+const DRIVER_QUANTUM: u32 = 4_096;
 const DRIVER_HOST_WAIT_LIMIT: Duration = Duration::from_secs(60);
 const HEAP_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 const STACK_MAX_FRAMES: u32 = 4_096;
@@ -53,7 +56,9 @@ function fnGlobalObject() {
 const ASYNC_HARNESS_SOURCE: &str = r#"
 var __tachyonAsyncStatus = 0;
 function $DONE(error) {
-  if (__tachyonAsyncStatus !== 0 || error) {
+  if (__tachyonAsyncStatus !== 0) {
+    __tachyonAsyncStatus = 3;
+  } else if (error) {
     __tachyonAsyncStatus = 2;
   } else {
     __tachyonAsyncStatus = 1;
@@ -90,17 +95,22 @@ const AGENT_BOOTSTRAP_SOURCE: &str = r#"
 })(globalThis.$262.agent);
 "#;
 
-/// Deterministic clock that also permits conformance fixtures to observe forward progress.
-#[derive(Default)]
+/// Runner clock backed by host monotonic time so Promise polling cannot consume fake time.
 struct Test262WallClock {
-    next_millisecond: i64,
+    started: Instant,
+}
+
+impl Default for Test262WallClock {
+    fn default() -> Self {
+        Self {
+            started: Instant::now(),
+        }
+    }
 }
 
 impl WallClockProvider for Test262WallClock {
     fn unix_time_milliseconds(&mut self) -> Result<i64, HostProviderError> {
-        let current = self.next_millisecond;
-        self.next_millisecond = self.next_millisecond.saturating_add(1);
-        Ok(current)
+        Ok(self.started.elapsed().as_millis().min(i64::MAX as u128) as i64)
     }
 }
 
@@ -487,7 +497,12 @@ fn execute_async_probe(isolate: &mut Isolate) -> EngineOutcome {
         Ok(RunOutcome::Completed(value)) if value.as_i32() == Some(2) => EngineOutcome::Error {
             phase: Phase::Runtime,
             error_type: "Test262Error".into(),
-            message: "Tachyon async test called $DONE with an error or more than once".into(),
+            message: "Tachyon async test called $DONE with an error".into(),
+        },
+        Ok(RunOutcome::Completed(value)) if value.as_i32() == Some(3) => EngineOutcome::Error {
+            phase: Phase::Runtime,
+            error_type: "Test262Error".into(),
+            message: "Tachyon async test called $DONE more than once".into(),
         },
         Ok(RunOutcome::Completed(_)) => {
             unsupported("Tachyon async test finished without calling $DONE")
@@ -543,7 +558,7 @@ fn drive_test262_work(
     let waker = Waker::from(Arc::clone(&wake));
     let mut context = Context::from_waker(&waker);
     let mut targets = root_evaluation.into_iter().collect::<VecDeque<_>>();
-    let quantum = NonZeroU32::new(u32::MAX).expect("driver quantum is non-zero");
+    let quantum = NonZeroU32::new(DRIVER_QUANTUM).expect("driver quantum is non-zero");
     for _ in 0..MODULE_TRANSITION_LIMIT {
         while let Some(request) = isolate.take_pending_dynamic_import() {
             let import_promise = match isolate.load_dynamic_import_graph(loader, &request) {
@@ -942,11 +957,12 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_wall_clock_advances_without_host_time() {
+    fn wall_clock_tracks_elapsed_host_time() {
         let mut clock = Test262WallClock::default();
-        assert_eq!(clock.unix_time_milliseconds(), Ok(0));
-        assert_eq!(clock.unix_time_milliseconds(), Ok(1));
-        assert_eq!(clock.unix_time_milliseconds(), Ok(2));
+        let first = clock.unix_time_milliseconds().unwrap();
+        let second = clock.unix_time_milliseconds().unwrap();
+        assert!(first >= 0);
+        assert!(second >= first);
     }
 
     #[test]
