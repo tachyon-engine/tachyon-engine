@@ -296,7 +296,10 @@ impl Isolate {
         let snapshot = self
             .array_buffer_data_snapshot(receiver)?
             .ok_or(ExecutionError::DetachedArrayBuffer)?;
-        if !snapshot.resizable || target > snapshot.max_byte_length {
+        if !snapshot.resizable {
+            return Err(ExecutionError::NonResizableArrayBuffer);
+        }
+        if target > snapshot.max_byte_length {
             return Err(ExecutionError::InvalidArrayLength);
         }
         self.heap.with_running_scope(|scope| {
