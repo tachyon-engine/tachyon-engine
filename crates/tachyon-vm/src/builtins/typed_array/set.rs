@@ -85,7 +85,7 @@ impl Isolate {
         }
     }
 
-    /// Resumes one offset, source-length, or source-element ToNumber operation.
+    /// Resumes one offset, source-length, or content-type-specific element conversion.
     pub(crate) fn resume_typed_array_set_conversion(
         &mut self,
         site: NativeContinuationSite,
@@ -93,21 +93,20 @@ impl Isolate {
         consumer: ConversionConsumer,
         value: Value,
     ) -> Result<(), ExecutionError> {
-        let number = self.convert_to_number(value)?;
         match consumer {
             ConversionConsumer::TypedArraySetOffset => {
+                let number = self.convert_to_number(value)?;
                 let offset = typed_array_set_offset(number)?;
                 self.set_typed_array_set_scalar(state, SET_OFFSET, offset as u64)?;
                 self.continue_typed_array_set_after_offset(site, state)
             }
             ConversionConsumer::TypedArraySetLength => {
+                let number = self.convert_to_number(value)?;
                 let length = typed_array_to_length(number)?;
                 self.finish_typed_array_set_length(site, state, length)
             }
             ConversionConsumer::TypedArraySetElement => {
-                let number = numeric_value(number)
-                    .ok_or(ExecutionError::UnsupportedNumberConversion(number))?;
-                self.write_typed_array_set_array_like_element(state, number)?;
+                self.write_typed_array_set_array_like_element(state, value)?;
                 self.advance_typed_array_set_array_like(site, state)
             }
             _ => Err(ExecutionError::MissingNativeContinuation),
@@ -199,20 +198,21 @@ impl Isolate {
                             value,
                         );
                     }
-                    let number = self.convert_to_number(value)?;
-                    let number = numeric_value(number)
-                        .ok_or(ExecutionError::UnsupportedNumberConversion(number))?;
-                    self.write_typed_array_set_array_like_element(state, number)?;
+                    self.write_typed_array_set_array_like_element(state, value)?;
                 }
                 PropertyReadResolution::Read(PropertyRead::Missing) => {
-                    let number = f64::NAN;
-                    self.write_typed_array_set_array_like_element(state, number)?;
+                    self.write_typed_array_set_array_like_element(
+                        state,
+                        Value::from_immediate(Immediate::Undefined),
+                    )?;
                 }
                 PropertyReadResolution::Read(PropertyRead::Accessor(getter))
                     if getter.as_immediate() == Some(Immediate::Undefined) =>
                 {
-                    let number = f64::NAN;
-                    self.write_typed_array_set_array_like_element(state, number)?;
+                    self.write_typed_array_set_array_like_element(
+                        state,
+                        Value::from_immediate(Immediate::Undefined),
+                    )?;
                 }
                 PropertyReadResolution::Read(PropertyRead::Accessor(_))
                 | PropertyReadResolution::Proxy(_) => {
@@ -231,7 +231,7 @@ impl Isolate {
     fn write_typed_array_set_array_like_element(
         &mut self,
         state: GcRef<NativeCallState>,
-        number: f64,
+        value: Value,
     ) -> Result<(), ExecutionError> {
         let pending = self.native_call_state_snapshot(state)?;
         let offset = typed_array_set_usize(pending.values[SET_OFFSET])?;
@@ -240,7 +240,7 @@ impl Isolate {
         let target_index = offset
             .checked_add(index)
             .ok_or(ExecutionError::InvalidArrayLength)?;
-        match self.typed_array_write_element(target, target_index, number) {
+        match self.typed_array_write_value(target, target_index, value) {
             Ok(()) | Err(ExecutionError::DetachedArrayBuffer) => {}
             Err(error) => return Err(error),
         }
@@ -259,6 +259,9 @@ impl Isolate {
         self.typed_array_backing(target.buffer)?;
         let source = self.typed_array_snapshot(source_value)?;
         self.typed_array_backing(source.buffer)?;
+        if source.kind.content_type() != target.kind.content_type() {
+            return Err(ExecutionError::TypedArrayContentTypeMismatch);
+        }
         if offset > target.length || source.length > target.length - offset {
             return Err(ExecutionError::InvalidArrayLength);
         }
@@ -266,7 +269,9 @@ impl Isolate {
             self.copy_typed_array_set_same_backing(target, source, offset)?;
         } else {
             let source_bytes = self.snapshot_typed_array_set_source(source)?;
-            let bytes = if source.kind == target.kind {
+            let bytes = if source.kind == target.kind
+                || source.kind.content_type() == ContentType::BigInt
+            {
                 source_bytes
             } else {
                 convert_typed_array_set_bytes(source, target.kind, &source_bytes)?
