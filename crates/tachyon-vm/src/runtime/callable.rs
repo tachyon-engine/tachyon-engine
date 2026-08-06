@@ -2669,6 +2669,7 @@ pub(crate) struct VmTypes {
     pub(crate) intl_collator_object: GcType<IntlCollatorObject>,
     pub(crate) intl_date_time_format_payload: GcType<IntlDateTimeFormatPayload>,
     pub(crate) intl_date_time_format_object: GcType<IntlDateTimeFormatObject>,
+    pub(crate) pending_intl_date_time_format: GcType<PendingIntlDateTimeFormat>,
     pub(crate) pending_intl_collator: GcType<PendingIntlCollator>,
     pub(crate) pending_intl_number_format: GcType<PendingIntlNumberFormat>,
     pub(crate) intl_number_format_payload: GcType<IntlNumberFormatPayload>,
@@ -2847,6 +2848,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidLocaleListElement(_)
         | ExecutionError::IncompatibleIntlCollatorReceiver(_)
         | ExecutionError::IncompatibleIntlDateTimeFormatReceiver(_)
+        | ExecutionError::IntlDateTimeFormatStyleConflict
         | ExecutionError::IncompatibleIntlNumberFormatReceiver(_)
         | ExecutionError::MissingIntlNumberFormatCurrency
         | ExecutionError::MissingIntlNumberFormatUnit

@@ -642,6 +642,9 @@ impl Isolate {
             intl_date_time_format_object: registry
                 .try_register("IntlDateTimeFormatObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_intl_date_time_format: registry
+                .try_register("PendingIntlDateTimeFormat")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_intl_collator: registry
                 .try_register("PendingIntlCollator")
                 .map_err(IsolateCreationError::TypeRegistration)?,

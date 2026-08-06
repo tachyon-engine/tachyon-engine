@@ -251,8 +251,9 @@ use bound_function::BoundFunctionData;
 use builtins::object::PendingGetOwnPropertyDescriptors;
 use builtins::signals::{ComputedSignal, SignalRuntime, StateSignal, WatcherSignal};
 use builtins::{
-    PendingDateNumericArguments, PendingIntlCollator, PendingIntlNumberFormat,
-    PendingJsonStringify, math_variadic_add, math_variadic_finish, math_variadic_initial,
+    PendingDateNumericArguments, PendingIntlCollator, PendingIntlDateTimeFormat,
+    PendingIntlNumberFormat, PendingJsonStringify, math_variadic_add, math_variadic_finish,
+    math_variadic_initial,
 };
 use collection::{
     CollectionInitializerKind, MapObject, OrderedCollection, PendingCollectionForEach,
@@ -580,6 +581,7 @@ pub enum ExecutionError {
     InvalidIntlSupportedValuesKey,
     InvalidIntlCollatorOption,
     InvalidIntlDateTimeFormatOption,
+    IntlDateTimeFormatStyleConflict,
     InvalidIntlNumberFormatOption,
     MissingIntlNumberFormatCurrency,
     MissingIntlNumberFormatUnit,

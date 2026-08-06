@@ -2448,7 +2448,9 @@ impl Isolate {
                     self.pending_argument_list_source(state)?
                 } else if matches!(
                     mode,
-                    PropertyCallbackMode::IntlCollator | PropertyCallbackMode::IntlNumberFormat
+                    PropertyCallbackMode::IntlCollator
+                        | PropertyCallbackMode::IntlNumberFormat
+                        | PropertyCallbackMode::IntlDateTimeFormat
                 ) {
                     continuation.second()
                 } else {
@@ -2656,6 +2658,7 @@ impl Isolate {
             }
             NativeContinuationKind::IntlCollator(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::IntlNumberFormat(_) => (continuation.second(), 0, None, 0),
+            NativeContinuationKind::IntlDateTimeFormat(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::IntlNumberFormatLegacy(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -8795,6 +8798,11 @@ impl Isolate {
                             self.pending_intl_number_format_reference(continuation.first())?;
                         let stage = self.pending_intl_number_format_stage(state)?;
                         self.resume_intl_number_format(continuation, stage, value)
+                    } else if mode == PropertyCallbackMode::IntlDateTimeFormat {
+                        let state =
+                            self.pending_intl_date_time_format_reference(continuation.first())?;
+                        let stage = self.pending_intl_date_time_format_stage(state)?;
+                        self.resume_pending_intl_date_time_format(continuation, stage, value)
                     } else if mode == PropertyCallbackMode::Descriptor {
                         let state =
                             self.pending_property_descriptor_reference(continuation.first())?;
@@ -8928,6 +8936,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::IntlNumberFormat(stage) => {
                     self.resume_intl_number_format(continuation, stage, value)
+                }
+                NativeContinuationKind::IntlDateTimeFormat(stage) => {
+                    self.resume_pending_intl_date_time_format(continuation, stage, value)
                 }
                 NativeContinuationKind::IntlNumberFormatLegacy(stage) => {
                     self.resume_intl_number_format_legacy(continuation, stage, value)

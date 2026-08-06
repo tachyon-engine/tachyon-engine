@@ -630,6 +630,19 @@ impl Isolate {
                     }
                     if matches!(
                         continuation.consumer,
+                        ConversionConsumer::IntlDateTimeFormatStringOption
+                            | ConversionConsumer::IntlDateTimeFormatNumberOption
+                    ) {
+                        let state =
+                            self.pending_intl_date_time_format_reference(continuation.receiver)?;
+                        return self.resume_intl_date_time_format_option_primitive(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
                         ConversionConsumer::IntlCollatorCompareLeft
                             | ConversionConsumer::IntlCollatorCompareRight
                     ) {
@@ -1688,6 +1701,12 @@ impl Isolate {
                 }
                 ConversionConsumer::IntlNumberFormatValue => {
                     unreachable!("NumberFormat value conversion resumes inside its state machine")
+                }
+                ConversionConsumer::IntlDateTimeFormatStringOption
+                | ConversionConsumer::IntlDateTimeFormatNumberOption => {
+                    unreachable!(
+                        "DateTimeFormat option conversion resumes inside its state machine"
+                    )
                 }
                 ConversionConsumer::IntlDateTimeFormatRangeStart
                 | ConversionConsumer::IntlDateTimeFormatRangeEnd => {

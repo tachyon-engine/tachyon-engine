@@ -359,6 +359,8 @@ pub(crate) enum ConversionConsumer {
     IntlNumberFormatStringOption,
     IntlNumberFormatNumberOption,
     IntlNumberFormatValue,
+    IntlDateTimeFormatStringOption,
+    IntlDateTimeFormatNumberOption,
     IntlDateTimeFormatRangeStart,
     IntlDateTimeFormatRangeEnd,
     IntlCollatorCompareLeft,
@@ -523,6 +525,8 @@ impl ConversionConsumer {
             | Self::IntlNumberFormatStringOption
             | Self::IntlNumberFormatNumberOption
             | Self::IntlNumberFormatValue
+            | Self::IntlDateTimeFormatStringOption
+            | Self::IntlDateTimeFormatNumberOption
             | Self::IntlDateTimeFormatRangeStart
             | Self::IntlDateTimeFormatRangeEnd
             | Self::IntlCollatorCompareLeft
@@ -680,6 +684,7 @@ impl ConversionConsumer {
                 | Self::IntlSupportedValuesKey
                 | Self::IntlCollatorOption
                 | Self::IntlNumberFormatStringOption
+                | Self::IntlDateTimeFormatStringOption
                 | Self::IntlCollatorCompareLeft
                 | Self::IntlCollatorCompareRight
                 | Self::JsonParseText
@@ -907,6 +912,7 @@ pub(crate) enum PropertyCallbackMode {
     ArgumentList,
     IntlCollator,
     IntlNumberFormat,
+    IntlDateTimeFormat,
     CopyDataProperties,
     DefineProperties,
 }
@@ -1793,6 +1799,32 @@ pub(crate) enum IntlNumberFormatStage {
     SignDisplay,
 }
 
+/// Observable boundaries in DateTimeFormat option processing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum IntlDateTimeFormatStage {
+    LocaleMatcher,
+    Calendar,
+    NumberingSystem,
+    Hour12,
+    HourCycle,
+    TimeZone,
+    Weekday,
+    Era,
+    Year,
+    Month,
+    Day,
+    DayPeriod,
+    Hour,
+    Minute,
+    Second,
+    FractionalSecondDigits,
+    TimeZoneName,
+    FormatMatcher,
+    DateStyle,
+    TimeStyle,
+}
+
 /// Observable legacy-constructor and UnwrapNumberFormat boundaries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1932,6 +1964,7 @@ pub(crate) enum NativeContinuationKind {
     IntlLocaleList(IntlLocaleListStage),
     IntlCollator(IntlCollatorStage),
     IntlNumberFormat(IntlNumberFormatStage),
+    IntlDateTimeFormat(IntlDateTimeFormatStage),
     IntlNumberFormatLegacy(IntlNumberFormatLegacyStage),
     JsonStringify(JsonStringifyStage),
     JsonParseReviver,
@@ -2016,6 +2049,37 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::PropertyGet(PropertyCallbackMode::IntlNumberFormat),
+            first: state,
+            second: options,
+        }
+    }
+
+    /// Roots DateTimeFormat constructor state across Proxy and conversion callbacks.
+    #[inline]
+    pub(crate) const fn intl_date_time_format(
+        site: NativeContinuationSite,
+        stage: IntlDateTimeFormatStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::IntlDateTimeFormat(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots DateTimeFormat state while one ordinary option getter executes JavaScript.
+    #[inline]
+    pub(crate) const fn intl_date_time_format_property_get(
+        site: NativeContinuationSite,
+        state: Value,
+        options: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PropertyGet(PropertyCallbackMode::IntlDateTimeFormat),
             first: state,
             second: options,
         }

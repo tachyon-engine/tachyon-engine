@@ -35,6 +35,7 @@ mod weak_ref;
 
 pub(crate) use date::PendingDateNumericArguments;
 pub(crate) use intl_collator::PendingIntlCollator;
+pub(crate) use intl_date_time_format::PendingIntlDateTimeFormat;
 pub(crate) use intl_number_format_options::PendingIntlNumberFormat;
 pub(crate) use json::PendingJsonStringify;
 pub(crate) use math::{math_variadic_add, math_variadic_finish, math_variadic_initial};

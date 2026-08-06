@@ -2,6 +2,9 @@
 
 use super::super::*;
 
+mod options;
+pub(crate) use options::PendingIntlDateTimeFormat;
+
 const MAX_TIME_VALUE: f64 = 8.64e15;
 
 struct IntlDateTimeFormatBoundRoots<'a> {
@@ -35,16 +38,16 @@ impl Isolate {
         &mut self,
         site: &CallSite,
     ) -> Result<(), ExecutionError> {
-        let undefined = Value::from_immediate(Immediate::Undefined);
-        let locales = self.call_argument(site, 0)?.unwrap_or(undefined);
-        let options = self.call_argument(site, 1)?.unwrap_or(undefined);
-        let new_target = if self.is_object_value(site.new_target) {
-            site.new_target
-        } else {
-            site.callee
-        };
-        let locales = self.intl_date_time_locale_list(locales)?;
-        let mut request = self.intl_date_time_request(locales, options)?;
+        self.start_intl_date_time_format_constructor(site)
+    }
+
+    /// Allocates the branded formatter after all observable option processing has completed.
+    fn finish_intl_date_time_format_constructor(
+        &mut self,
+        site: NativeContinuationSite,
+        new_target: Value,
+        mut request: IntlDateTimeFormatRequest,
+    ) -> Result<(), ExecutionError> {
         let default_time_zone = self
             .host_providers
             .time_zone_mut()
@@ -319,111 +322,6 @@ impl Isolate {
         Ok(canonical.into_boxed_slice())
     }
 
-    /// Reads the initial scalar option set in spec order for the first VM vertical slice.
-    fn intl_date_time_request(
-        &mut self,
-        locales: Box<[Box<str>]>,
-        options: Value,
-    ) -> Result<IntlDateTimeFormatRequest, ExecutionError> {
-        let undefined = Value::from_immediate(Immediate::Undefined);
-        let options = if options.as_immediate() == Some(Immediate::Undefined) {
-            None
-        } else {
-            Some(self.coerce_to_object(options)?)
-        };
-        let locale_matcher = self.intl_date_time_locale_matcher(options.unwrap_or(undefined))?;
-        let calendar = self.intl_date_time_optional_string(options, b"calendar")?;
-        let numbering_system = self.intl_date_time_optional_string(options, b"numberingSystem")?;
-        if calendar
-            .as_deref()
-            .is_some_and(|value| !is_date_time_unicode_locale_type(value))
-            || numbering_system
-                .as_deref()
-                .is_some_and(|value| !is_date_time_unicode_locale_type(value))
-        {
-            return Err(ExecutionError::InvalidIntlDateTimeFormatOption);
-        }
-        let hour_cycle = self
-            .intl_date_time_optional_string(options, b"hourCycle")?
-            .map(|value| parse_date_time_hour_cycle(&value))
-            .transpose()?;
-        let hour12 = self.intl_date_time_optional_boolean(options, b"hour12")?;
-        let time_zone = self
-            .intl_date_time_optional_string(options, b"timeZone")?
-            .unwrap_or_default();
-        let date_style = self
-            .intl_date_time_optional_string(options, b"dateStyle")?
-            .map(|value| parse_date_time_style(&value))
-            .transpose()?;
-        let time_style = self
-            .intl_date_time_optional_string(options, b"timeStyle")?
-            .map(|value| parse_date_time_style(&value))
-            .transpose()?;
-        let mut fields = IntlDateTimeFormatOptions {
-            weekday: self
-                .intl_date_time_optional_string(options, b"weekday")?
-                .map(|value| parse_date_time_text_style(&value))
-                .transpose()?,
-            era: self
-                .intl_date_time_optional_string(options, b"era")?
-                .map(|value| parse_date_time_text_style(&value))
-                .transpose()?,
-            year: self
-                .intl_date_time_optional_string(options, b"year")?
-                .map(|value| parse_date_time_numeric_style(&value))
-                .transpose()?,
-            month: self
-                .intl_date_time_optional_string(options, b"month")?
-                .map(|value| parse_date_time_month_style(&value))
-                .transpose()?,
-            day: self
-                .intl_date_time_optional_string(options, b"day")?
-                .map(|value| parse_date_time_numeric_style(&value))
-                .transpose()?,
-            day_period: self
-                .intl_date_time_optional_string(options, b"dayPeriod")?
-                .map(|value| parse_date_time_text_style(&value))
-                .transpose()?,
-            hour: self
-                .intl_date_time_optional_string(options, b"hour")?
-                .map(|value| parse_date_time_numeric_style(&value))
-                .transpose()?,
-            minute: self
-                .intl_date_time_optional_string(options, b"minute")?
-                .map(|value| parse_date_time_numeric_style(&value))
-                .transpose()?,
-            second: self
-                .intl_date_time_optional_string(options, b"second")?
-                .map(|value| parse_date_time_numeric_style(&value))
-                .transpose()?,
-            fractional_second_digits: self.intl_date_time_optional_fraction_digits(options)?,
-            time_zone_name: self
-                .intl_date_time_optional_string(options, b"timeZoneName")?
-                .map(|value| parse_date_time_zone_name_style(&value))
-                .transpose()?,
-            date_style,
-            time_style,
-        };
-        if (date_style.is_some() || time_style.is_some()) && has_date_time_components(&fields) {
-            return Err(ExecutionError::InvalidIntlDateTimeFormatOption);
-        }
-        if !has_date_time_components(&fields) && date_style.is_none() && time_style.is_none() {
-            fields.year = Some(IntlDateTimeNumericStyle::Numeric);
-            fields.month = Some(IntlDateTimeMonthStyle::Numeric);
-            fields.day = Some(IntlDateTimeNumericStyle::Numeric);
-        }
-        Ok(IntlDateTimeFormatRequest {
-            locales,
-            locale_matcher,
-            calendar,
-            numbering_system,
-            hour_cycle,
-            hour12,
-            time_zone,
-            options: fields,
-        })
-    }
-
     fn intl_date_time_locale_matcher(
         &mut self,
         options: Value,
@@ -465,50 +363,6 @@ impl Isolate {
         self.intl_ascii_string(value)
             .map(Some)
             .map_err(|_| ExecutionError::InvalidIntlDateTimeFormatOption)
-    }
-
-    fn intl_date_time_optional_boolean(
-        &mut self,
-        options: Option<Value>,
-        name: &[u8],
-    ) -> Result<Option<bool>, ExecutionError> {
-        let Some(options) = options else {
-            return Ok(None);
-        };
-        let key = self.intern_intrinsic_name(name)?;
-        let value = self
-            .get_data_property(options, key)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        if value.as_immediate() == Some(Immediate::Undefined) {
-            Ok(None)
-        } else {
-            self.is_truthy_value(value).map(Some)
-        }
-    }
-
-    fn intl_date_time_optional_fraction_digits(
-        &mut self,
-        options: Option<Value>,
-    ) -> Result<Option<u8>, ExecutionError> {
-        let Some(options) = options else {
-            return Ok(None);
-        };
-        let key = self.intern_intrinsic_name(b"fractionalSecondDigits")?;
-        let value = self
-            .get_data_property(options, key)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        if value.as_immediate() == Some(Immediate::Undefined) {
-            return Ok(None);
-        }
-        if self.is_object_value(value) {
-            return Err(ExecutionError::InvalidIntlDateTimeFormatOption);
-        }
-        let number = numeric_value(self.convert_to_number(value)?)
-            .ok_or(ExecutionError::InvalidIntlDateTimeFormatOption)?;
-        if !number.is_finite() || number.fract() != 0.0 || !(1.0..=3.0).contains(&number) {
-            return Err(ExecutionError::InvalidIntlDateTimeFormatOption);
-        }
-        Ok(Some(number as u8))
     }
 
     fn canonicalize_intl_time_zone(&mut self, time_zone: &str) -> Result<Box<str>, ExecutionError> {
