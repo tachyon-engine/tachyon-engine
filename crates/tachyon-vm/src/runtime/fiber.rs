@@ -359,6 +359,8 @@ pub(crate) enum ConversionConsumer {
     IntlNumberFormatStringOption,
     IntlNumberFormatNumberOption,
     IntlNumberFormatValue,
+    IntlDateTimeFormatRangeStart,
+    IntlDateTimeFormatRangeEnd,
     IntlCollatorCompareLeft,
     IntlCollatorCompareRight,
     JsonParseText,
@@ -521,6 +523,8 @@ impl ConversionConsumer {
             | Self::IntlNumberFormatStringOption
             | Self::IntlNumberFormatNumberOption
             | Self::IntlNumberFormatValue
+            | Self::IntlDateTimeFormatRangeStart
+            | Self::IntlDateTimeFormatRangeEnd
             | Self::IntlCollatorCompareLeft
             | Self::IntlCollatorCompareRight
             | Self::JsonParseText

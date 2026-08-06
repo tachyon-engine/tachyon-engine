@@ -440,6 +440,28 @@ impl Isolate {
                             value,
                         );
                     }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::IntlDateTimeFormatRangeStart
+                            | ConversionConsumer::IntlDateTimeFormatRangeEnd
+                    ) {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return match continuation.consumer {
+                            ConversionConsumer::IntlDateTimeFormatRangeStart => self
+                                .resume_intl_date_time_format_range_start(
+                                    continuation.site,
+                                    state,
+                                    value,
+                                ),
+                            ConversionConsumer::IntlDateTimeFormatRangeEnd => self
+                                .resume_intl_date_time_format_range_end(
+                                    continuation.site,
+                                    state,
+                                    value,
+                                ),
+                            _ => unreachable!(),
+                        };
+                    }
                     if continuation.consumer == ConversionConsumer::SetRecordSize {
                         let state = self.pending_set_operation_reference(continuation.receiver)?;
                         return self.resume_set_size_conversion(continuation.site, state, value);
@@ -1666,6 +1688,10 @@ impl Isolate {
                 }
                 ConversionConsumer::IntlNumberFormatValue => {
                     unreachable!("NumberFormat value conversion resumes inside its state machine")
+                }
+                ConversionConsumer::IntlDateTimeFormatRangeStart
+                | ConversionConsumer::IntlDateTimeFormatRangeEnd => {
+                    unreachable!("DateTimeFormat range conversion resumes inside its state machine")
                 }
                 ConversionConsumer::IntlCollatorCompareLeft
                 | ConversionConsumer::IntlCollatorCompareRight => {

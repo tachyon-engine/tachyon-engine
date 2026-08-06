@@ -268,6 +268,9 @@ pub(crate) struct Realm {
     pub(crate) intl_collator_constructor: Option<Value>,
     pub(crate) intl_collator_prototype: Option<Value>,
     pub(crate) intl_collator_compare: Option<Value>,
+    pub(crate) intl_date_time_format_constructor: Option<Value>,
+    pub(crate) intl_date_time_format_prototype: Option<Value>,
+    pub(crate) intl_date_time_format_format: Option<Value>,
     pub(crate) intl_number_format_constructor: Option<Value>,
     pub(crate) intl_number_format_prototype: Option<Value>,
     pub(crate) intl_number_format_format: Option<Value>,
@@ -487,6 +490,9 @@ impl Realm {
             intl_collator_constructor: None,
             intl_collator_prototype: None,
             intl_collator_compare: None,
+            intl_date_time_format_constructor: None,
+            intl_date_time_format_prototype: None,
+            intl_date_time_format_format: None,
             intl_number_format_constructor: None,
             intl_number_format_prototype: None,
             intl_number_format_format: None,
@@ -973,6 +979,9 @@ impl Trace for Realm {
         self.intl_collator_constructor.trace(tracer);
         self.intl_collator_prototype.trace(tracer);
         self.intl_collator_compare.trace(tracer);
+        self.intl_date_time_format_constructor.trace(tracer);
+        self.intl_date_time_format_prototype.trace(tracer);
+        self.intl_date_time_format_format.trace(tracer);
         self.intl_number_format_constructor.trace(tracer);
         self.intl_number_format_prototype.trace(tracer);
         self.intl_number_format_format.trace(tracer);

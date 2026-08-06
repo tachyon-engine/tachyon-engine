@@ -158,6 +158,9 @@ pub trait WallClockProvider: Send {
 
 /// Supplies ECMAScript-compatible local-time conversions without filesystem or locale access.
 pub trait TimeZoneProvider: Send {
+    /// Returns the canonical identifier selected as the embedding's default time zone.
+    fn default_time_zone_identifier(&mut self) -> Result<Box<str>, HostProviderError>;
+
     /// Returns the local offset applied to UTC; values must remain within one civil day.
     fn offset_milliseconds_for_utc(
         &mut self,
@@ -169,6 +172,19 @@ pub trait TimeZoneProvider: Send {
         &mut self,
         local_milliseconds: i64,
     ) -> Result<i64, HostProviderError>;
+
+    /// Returns the offset for an explicitly requested canonical zone identifier.
+    fn offset_milliseconds_for_utc_in_zone(
+        &mut self,
+        identifier: &str,
+        utc_milliseconds: i64,
+    ) -> Result<i64, HostProviderError> {
+        let default = self.default_time_zone_identifier()?;
+        if !default.eq_ignore_ascii_case(identifier) {
+            return Err(HostProviderError::Unavailable);
+        }
+        self.offset_milliseconds_for_utc(utc_milliseconds)
+    }
 }
 
 /// Provider-owned data collections exposed by `Intl.supportedValuesOf`.
@@ -658,6 +674,31 @@ pub struct IntlFormattedDateTimeParts {
     pub spans: Box<[IntlDateTimePartSpan]>,
 }
 
+/// Identifies whether one interval field belongs to the start, end, or shared pattern.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlDateTimeRangeSource {
+    StartRange,
+    EndRange,
+    Shared,
+}
+
+/// One UTF-16 field range in a provider-owned formatted date-time interval.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IntlDateTimeRangePartSpan {
+    pub kind: IntlDateTimePartType,
+    pub source: IntlDateTimeRangeSource,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// One formatted interval and the ordered, gap-free fields that partition it.
+#[derive(Debug, Eq, PartialEq)]
+pub struct IntlFormattedDateTimeRangeParts {
+    pub formatted: Box<[u16]>,
+    pub spans: Box<[IntlDateTimeRangePartSpan]>,
+}
+
 /// Opaque compiled date-time formatting state retained by a GC external payload.
 pub trait IntlDateTimeFormatBackend: Send {
     /// Formats one finite TimeClip result and its host-provided civil offset.
@@ -668,6 +709,97 @@ pub trait IntlDateTimeFormatBackend: Send {
         &self,
         input: IntlDateTimeInput,
     ) -> Result<IntlFormattedDateTimeParts, HostProviderError>;
+
+    /// Formats an interval, permitting providers to apply locale-specific field collapsing.
+    fn format_range(
+        &self,
+        start: IntlDateTimeInput,
+        end: IntlDateTimeInput,
+    ) -> Result<Box<[u16]>, HostProviderError> {
+        Ok(self.format_range_to_parts(start, end)?.formatted)
+    }
+
+    /// Formats an interval with field ownership; the default preserves all endpoint fields.
+    fn format_range_to_parts(
+        &self,
+        start: IntlDateTimeInput,
+        end: IntlDateTimeInput,
+    ) -> Result<IntlFormattedDateTimeRangeParts, HostProviderError> {
+        const SEPARATOR: &[u16] = &[0x20, 0x2013, 0x20];
+        const DATA_FAILURE: HostProviderError = HostProviderError::Failure(3);
+
+        let start = self.format_to_parts(start)?;
+        let end = self.format_to_parts(end)?;
+        if start.formatted == end.formatted {
+            let mut spans = Vec::new();
+            spans
+                .try_reserve_exact(start.spans.len())
+                .map_err(|_| DATA_FAILURE)?;
+            spans.extend(start.spans.iter().map(|span| IntlDateTimeRangePartSpan {
+                kind: span.kind,
+                source: IntlDateTimeRangeSource::Shared,
+                start: span.start,
+                end: span.end,
+            }));
+            return Ok(IntlFormattedDateTimeRangeParts {
+                formatted: start.formatted,
+                spans: spans.into_boxed_slice(),
+            });
+        }
+
+        let separator_start = u32::try_from(start.formatted.len()).map_err(|_| DATA_FAILURE)?;
+        let separator_end = separator_start
+            .checked_add(u32::try_from(SEPARATOR.len()).map_err(|_| DATA_FAILURE)?)
+            .ok_or(DATA_FAILURE)?;
+        let total_units = start
+            .formatted
+            .len()
+            .checked_add(SEPARATOR.len())
+            .and_then(|length| length.checked_add(end.formatted.len()))
+            .ok_or(DATA_FAILURE)?;
+        let mut formatted = Vec::new();
+        formatted
+            .try_reserve_exact(total_units)
+            .map_err(|_| DATA_FAILURE)?;
+        formatted.extend_from_slice(&start.formatted);
+        formatted.extend_from_slice(SEPARATOR);
+        formatted.extend_from_slice(&end.formatted);
+
+        let span_capacity = start
+            .spans
+            .len()
+            .checked_add(end.spans.len())
+            .and_then(|length| length.checked_add(1))
+            .ok_or(DATA_FAILURE)?;
+        let mut spans = Vec::new();
+        spans
+            .try_reserve_exact(span_capacity)
+            .map_err(|_| DATA_FAILURE)?;
+        spans.extend(start.spans.iter().map(|span| IntlDateTimeRangePartSpan {
+            kind: span.kind,
+            source: IntlDateTimeRangeSource::StartRange,
+            start: span.start,
+            end: span.end,
+        }));
+        spans.push(IntlDateTimeRangePartSpan {
+            kind: IntlDateTimePartType::Literal,
+            source: IntlDateTimeRangeSource::Shared,
+            start: separator_start,
+            end: separator_end,
+        });
+        for span in &end.spans {
+            spans.push(IntlDateTimeRangePartSpan {
+                kind: span.kind,
+                source: IntlDateTimeRangeSource::EndRange,
+                start: span.start.checked_add(separator_end).ok_or(DATA_FAILURE)?,
+                end: span.end.checked_add(separator_end).ok_or(DATA_FAILURE)?,
+            });
+        }
+        Ok(IntlFormattedDateTimeRangeParts {
+            formatted: formatted.into_boxed_slice(),
+            spans: spans.into_boxed_slice(),
+        })
+    }
 
     /// Reports only heap backing retained beyond the boxed trait object itself.
     fn external_memory_bytes(&self) -> usize;
@@ -741,6 +873,14 @@ pub trait IntlProvider: Send {
         _locales: &[Box<str>],
         _matcher: IntlLocaleMatcher,
     ) -> Result<Box<[Box<str>]>, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+
+    /// Canonicalizes one ECMA-402 time-zone identifier using provider-owned zone data.
+    fn canonicalize_time_zone(
+        &mut self,
+        _identifier: &str,
+    ) -> Result<Option<Box<str>>, HostProviderError> {
         Err(HostProviderError::Unavailable)
     }
 }

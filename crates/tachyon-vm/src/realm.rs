@@ -4154,6 +4154,118 @@ impl Isolate {
             true,
         )?;
 
+        let date_time_format_prototype =
+            self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: object_prototype,
+            })?;
+        self.realm.intl_date_time_format_prototype = Some(date_time_format_prototype);
+        let date_time_format_constructor = self.allocate_native_function(
+            NativeFunction::IntlDateTimeFormatConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.intl_date_time_format_constructor = Some(date_time_format_constructor);
+        self.set_function_prototype(date_time_format_constructor, date_time_format_prototype)?;
+        self.set_intrinsic_data_property(
+            date_time_format_prototype,
+            constructor_atom,
+            date_time_format_constructor,
+            true,
+        )?;
+        let date_time_format_atom = self.intern_intrinsic_name(b"DateTimeFormat")?;
+        self.set_intrinsic_data_property(
+            object,
+            date_time_format_atom,
+            date_time_format_constructor,
+            true,
+        )?;
+        self.install_collection_accessor(
+            date_time_format_prototype,
+            function_prototype,
+            b"format",
+            NativeFunction::IntlDateTimeFormatFormatGetter,
+        )?;
+        let date_time_format = self.allocate_native_function(
+            NativeFunction::IntlDateTimeFormatFormat,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.intl_date_time_format_format = Some(date_time_format);
+        for (name, native) in [
+            (
+                b"formatToParts".as_slice(),
+                NativeFunction::IntlDateTimeFormatFormatToParts,
+            ),
+            (
+                b"formatRange".as_slice(),
+                NativeFunction::IntlDateTimeFormatFormatRange,
+            ),
+            (
+                b"formatRangeToParts".as_slice(),
+                NativeFunction::IntlDateTimeFormatFormatRangeToParts,
+            ),
+            (
+                b"resolvedOptions".as_slice(),
+                NativeFunction::IntlDateTimeFormatResolvedOptions,
+            ),
+        ] {
+            let method = self.allocate_native_function(
+                native,
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            let atom = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(date_time_format_prototype, atom, method, true)?;
+        }
+        let date_time_supported_locales = self.allocate_native_function(
+            NativeFunction::IntlDateTimeFormatSupportedLocalesOf,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.set_intrinsic_data_property(
+            date_time_format_constructor,
+            supported_locales_atom,
+            date_time_supported_locales,
+            true,
+        )?;
+        let date_time_tag = self.intern_intrinsic_name(b"Intl.DateTimeFormat")?;
+        let date_time_tag_value = self.atom_string_value(date_time_tag)?;
+        let to_string_tag = self.property_key(
+            self.agent
+                .well_known_symbols
+                .to_string_tag
+                .expect("well-known symbols initialize before Intl.DateTimeFormat"),
+        )?;
+        self.define_data_property(
+            date_time_format_prototype,
+            to_string_tag,
+            DataPropertyDescriptor {
+                value: Some(date_time_tag_value),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+
         let number_format_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
             shape: ShapeId::EMPTY,
             extensible: true,

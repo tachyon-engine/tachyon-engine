@@ -449,6 +449,14 @@ impl Isolate {
                     |object| &mut object.ordinary,
                 )?;
             }
+            ObjectReceiver::IntlDateTimeFormat(date_time_format) => {
+                self.set_embedded_object_prototype(
+                    date_time_format,
+                    self.types.intl_date_time_format_object,
+                    prototype,
+                    |object| &mut object.ordinary,
+                )?;
+            }
             ObjectReceiver::IntlNumberFormat(number_format) => {
                 self.set_embedded_object_prototype(
                     number_format,
@@ -1230,6 +1238,25 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::IntlNumberFormat(number_format), ordinary));
         }
+        if let Ok(date_time_format) = self
+            .heap
+            .checked_reference(raw, self.types.intl_date_time_format_object)
+        {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let date_time_format =
+                    scope.root(date_time_format).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(date_time_format, self.types.intl_date_time_format_object)
+                        .map(|date_time_format| date_time_format.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((
+                ObjectReceiver::IntlDateTimeFormat(date_time_format),
+                ordinary,
+            ));
+        }
         if let Ok(number) = self.heap.checked_reference(raw, self.types.number_object) {
             let ordinary = self.heap.with_running_scope(|scope| {
                 let local = scope.root(number).map_err(ExecutionError::Root)?;
@@ -1631,6 +1658,13 @@ impl Isolate {
                 extensible,
                 |object| &mut object.ordinary,
             ),
+            ObjectReceiver::IntlDateTimeFormat(date_time_format) => self
+                .set_embedded_object_extensible(
+                    date_time_format,
+                    self.types.intl_date_time_format_object,
+                    extensible,
+                    |object| &mut object.ordinary,
+                ),
             ObjectReceiver::IntlNumberFormat(number_format) => self.set_embedded_object_extensible(
                 number_format,
                 self.types.intl_number_format_object,
@@ -2008,6 +2042,12 @@ impl Isolate {
             ObjectReceiver::IntlCollator(collator) => self.set_embedded_object_shape(
                 collator,
                 self.types.intl_collator_object,
+                shape,
+                |object| &mut object.ordinary,
+            ),
+            ObjectReceiver::IntlDateTimeFormat(date_time_format) => self.set_embedded_object_shape(
+                date_time_format,
+                self.types.intl_date_time_format_object,
                 shape,
                 |object| &mut object.ordinary,
             ),
@@ -2492,6 +2532,14 @@ impl Isolate {
                 storage,
                 |object| &mut object.ordinary,
             ),
+            ObjectReceiver::IntlDateTimeFormat(date_time_format) => self
+                .update_embedded_object_storage(
+                    date_time_format,
+                    self.types.intl_date_time_format_object,
+                    shape,
+                    storage,
+                    |object| &mut object.ordinary,
+                ),
             ObjectReceiver::IntlNumberFormat(number_format) => self.update_embedded_object_storage(
                 number_format,
                 self.types.intl_number_format_object,
@@ -3030,6 +3078,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.intl_collator_object)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.intl_date_time_format_object)
                 .is_ok()
             || self
                 .heap

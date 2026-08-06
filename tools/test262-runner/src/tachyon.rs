@@ -118,6 +118,10 @@ impl WallClockProvider for Test262WallClock {
 struct Test262UtcTimeZone;
 
 impl TimeZoneProvider for Test262UtcTimeZone {
+    fn default_time_zone_identifier(&mut self) -> Result<Box<str>, HostProviderError> {
+        Ok("UTC".into())
+    }
+
     fn offset_milliseconds_for_utc(
         &mut self,
         _utc_milliseconds: i64,

@@ -20,6 +20,14 @@ pub(super) fn supported_values(key: IntlSupportedValuesKey) -> Box<[Box<str>]> {
         .into_boxed_slice()
 }
 
+/// Finds the canonical primary time-zone spelling without exposing ICU iterator lifetimes.
+pub(super) fn canonical_time_zone(identifier: &str) -> Option<Box<str>> {
+    supported_time_zones()
+        .into_vec()
+        .into_iter()
+        .find(|candidate| candidate.eq_ignore_ascii_case(identifier))
+}
+
 /// Enumerates canonical primary IANA identifiers and applies ECMA-402's UTC spelling.
 fn supported_time_zones() -> Box<[Box<str>]> {
     let parser = IanaParserExtended::new();

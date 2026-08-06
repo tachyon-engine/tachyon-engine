@@ -438,7 +438,10 @@ impl Isolate {
     }
 
     /// Converts a managed ECMAScript String into an ASCII BCP 47 input and calls the provider.
-    fn canonicalize_intl_locale_text(&mut self, value: Value) -> Result<Box<str>, ExecutionError> {
+    pub(crate) fn canonicalize_intl_locale_text(
+        &mut self,
+        value: Value,
+    ) -> Result<Box<str>, ExecutionError> {
         let tag = self.string_value_to_ascii(value)?;
         self.canonicalize_intl_ascii_tag(&tag)
     }
@@ -459,7 +462,10 @@ impl Isolate {
         String::from_utf8(bytes).map_err(|_| ExecutionError::InvalidLanguageTag)
     }
 
-    fn canonicalize_intl_ascii_tag(&mut self, tag: &str) -> Result<Box<str>, ExecutionError> {
+    pub(crate) fn canonicalize_intl_ascii_tag(
+        &mut self,
+        tag: &str,
+    ) -> Result<Box<str>, ExecutionError> {
         self.host_providers
             .intl_mut()
             .ok_or(ExecutionError::MissingIntlProvider)?

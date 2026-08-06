@@ -13,6 +13,8 @@ mod function;
 mod global;
 mod intl;
 mod intl_collator;
+mod intl_date_time_format;
+mod intl_date_time_format_range;
 mod intl_number_format;
 mod intl_number_format_options;
 mod json;

@@ -154,6 +154,13 @@ impl IntlProvider for Icu4xIntlProvider {
     ) -> Result<Box<[Box<str>]>, HostProviderError> {
         Ok(date_time_format::supported_locales(locales, matcher))
     }
+
+    fn canonicalize_time_zone(
+        &mut self,
+        identifier: &str,
+    ) -> Result<Option<Box<str>>, HostProviderError> {
+        Ok(supported_values::canonical_time_zone(identifier))
+    }
 }
 
 /// Invalid default locale supplied by an embedder during provider construction.

@@ -23,6 +23,10 @@ impl WallClockProvider for FailingClock {
 struct FixedTimeZone(i64);
 
 impl TimeZoneProvider for FixedTimeZone {
+    fn default_time_zone_identifier(&mut self) -> Result<Box<str>, HostProviderError> {
+        Ok("UTC".into())
+    }
+
     fn offset_milliseconds_for_utc(
         &mut self,
         _utc_milliseconds: i64,
@@ -41,6 +45,10 @@ impl TimeZoneProvider for FixedTimeZone {
 struct FailingTimeZone;
 
 impl TimeZoneProvider for FailingTimeZone {
+    fn default_time_zone_identifier(&mut self) -> Result<Box<str>, HostProviderError> {
+        Err(HostProviderError::Failure(7))
+    }
+
     fn offset_milliseconds_for_utc(
         &mut self,
         _utc_milliseconds: i64,

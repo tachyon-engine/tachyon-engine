@@ -783,6 +783,14 @@ pub(crate) enum NativeFunction {
     IntlCollatorCompare,
     IntlCollatorResolvedOptions,
     IntlCollatorSupportedLocalesOf,
+    IntlDateTimeFormatConstructor,
+    IntlDateTimeFormatFormatGetter,
+    IntlDateTimeFormatFormat,
+    IntlDateTimeFormatFormatToParts,
+    IntlDateTimeFormatFormatRange,
+    IntlDateTimeFormatFormatRangeToParts,
+    IntlDateTimeFormatResolvedOptions,
+    IntlDateTimeFormatSupportedLocalesOf,
     IntlNumberFormatConstructor,
     IntlNumberFormatFormatGetter,
     IntlNumberFormatFormat,
@@ -1156,6 +1164,7 @@ impl NativeFunction {
                 | Self::FinalizationRegistryConstructor
                 | Self::IntlLocaleConstructor
                 | Self::IntlCollatorConstructor
+                | Self::IntlDateTimeFormatConstructor
                 | Self::IntlNumberFormatConstructor
         )
     }
@@ -1590,6 +1599,7 @@ impl NativeFunction {
             | Self::IntlGetCanonicalLocales
             | Self::IntlSupportedValuesOf
             | Self::IntlCollatorSupportedLocalesOf
+            | Self::IntlDateTimeFormatSupportedLocalesOf
             | Self::IntlNumberFormatSupportedLocalesOf => 1,
             Self::IntlLocaleToString
             | Self::IntlLocaleCalendar
@@ -1598,12 +1608,18 @@ impl NativeFunction {
             | Self::IntlCollatorCompareGetter
             | Self::IntlCollatorResolvedOptions
             | Self::IntlCollatorConstructor
+            | Self::IntlDateTimeFormatFormatGetter
+            | Self::IntlDateTimeFormatResolvedOptions
+            | Self::IntlDateTimeFormatConstructor
             | Self::IntlNumberFormatFormatGetter
             | Self::IntlNumberFormatResolvedOptions
             | Self::IntlNumberFormatConstructor => 0,
             Self::IntlCollatorCompare
+            | Self::IntlDateTimeFormatFormat
+            | Self::IntlDateTimeFormatFormatToParts
             | Self::IntlNumberFormatFormat
             | Self::IntlNumberFormatFormatToParts => 1,
+            Self::IntlDateTimeFormatFormatRange | Self::IntlDateTimeFormatFormatRangeToParts => 2,
             Self::JsonParse => 2,
             Self::JsonStringify => 3,
             Self::HostCreateRealm => 0,
@@ -2031,6 +2047,14 @@ impl NativeFunction {
             Self::IntlCollatorCompare => "",
             Self::IntlCollatorResolvedOptions => "resolvedOptions",
             Self::IntlCollatorSupportedLocalesOf => "supportedLocalesOf",
+            Self::IntlDateTimeFormatConstructor => "DateTimeFormat",
+            Self::IntlDateTimeFormatFormatGetter => "get format",
+            Self::IntlDateTimeFormatFormat => "",
+            Self::IntlDateTimeFormatFormatToParts => "formatToParts",
+            Self::IntlDateTimeFormatFormatRange => "formatRange",
+            Self::IntlDateTimeFormatFormatRangeToParts => "formatRangeToParts",
+            Self::IntlDateTimeFormatResolvedOptions => "resolvedOptions",
+            Self::IntlDateTimeFormatSupportedLocalesOf => "supportedLocalesOf",
             Self::IntlNumberFormatConstructor => "NumberFormat",
             Self::IntlNumberFormatFormatGetter => "get format",
             Self::IntlNumberFormatFormat => "",
@@ -2365,6 +2389,7 @@ pub(crate) enum ObjectReceiver {
     Error(GcRef<ErrorObject>),
     Date(GcRef<DateObject>),
     IntlCollator(GcRef<IntlCollatorObject>),
+    IntlDateTimeFormat(GcRef<IntlDateTimeFormatObject>),
     IntlNumberFormat(GcRef<IntlNumberFormatObject>),
     Number(GcRef<NumberObject>),
     BigInt(GcRef<BigIntObject>),
@@ -2406,6 +2431,9 @@ impl ObjectReceiver {
             Self::Error(error) => Value::from_heap_ref(error.raw()),
             Self::Date(date) => Value::from_heap_ref(date.raw()),
             Self::IntlCollator(collator) => Value::from_heap_ref(collator.raw()),
+            Self::IntlDateTimeFormat(date_time_format) => {
+                Value::from_heap_ref(date_time_format.raw())
+            }
             Self::IntlNumberFormat(number_format) => Value::from_heap_ref(number_format.raw()),
             Self::Number(number) => Value::from_heap_ref(number.raw()),
             Self::BigInt(bigint) => Value::from_heap_ref(bigint.raw()),
@@ -2639,6 +2667,8 @@ pub(crate) struct VmTypes {
     pub(crate) date_object: GcType<DateObject>,
     pub(crate) intl_collator_backend: GcType<IntlCollatorBackendPayload>,
     pub(crate) intl_collator_object: GcType<IntlCollatorObject>,
+    pub(crate) intl_date_time_format_payload: GcType<IntlDateTimeFormatPayload>,
+    pub(crate) intl_date_time_format_object: GcType<IntlDateTimeFormatObject>,
     pub(crate) pending_intl_collator: GcType<PendingIntlCollator>,
     pub(crate) pending_intl_number_format: GcType<PendingIntlNumberFormat>,
     pub(crate) intl_number_format_payload: GcType<IntlNumberFormatPayload>,
@@ -2816,6 +2846,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidJsonCircularStructure
         | ExecutionError::InvalidLocaleListElement(_)
         | ExecutionError::IncompatibleIntlCollatorReceiver(_)
+        | ExecutionError::IncompatibleIntlDateTimeFormatReceiver(_)
         | ExecutionError::IncompatibleIntlNumberFormatReceiver(_)
         | ExecutionError::MissingIntlNumberFormatCurrency
         | ExecutionError::MissingIntlNumberFormatUnit
@@ -2850,6 +2881,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidNormalizationForm
         | ExecutionError::InvalidIntlSupportedValuesKey
         | ExecutionError::InvalidIntlCollatorOption
+        | ExecutionError::InvalidIntlDateTimeFormatOption
         | ExecutionError::InvalidIntlNumberFormatOption
         | ExecutionError::InvalidLanguageTag => Some(NativeErrorKind::Range),
         ExecutionError::InvalidUriEncoding => Some(NativeErrorKind::Uri),

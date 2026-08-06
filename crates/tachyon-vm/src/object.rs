@@ -7,7 +7,8 @@ use tachyon_value::{RawHeapRef, Value};
 
 use crate::{
     AtomId, CodeId, IntlCollatorBackend, IntlCollatorCaseFirst, IntlCollatorSensitivity,
-    IntlCollatorUsage, IntlNumberFormatBackend, IntlNumberFormatResolved, tuning::objects,
+    IntlCollatorUsage, IntlDateTimeFormatBackend, IntlDateTimeFormatResolved,
+    IntlNumberFormatBackend, IntlNumberFormatResolved, tuning::objects,
 };
 use tachyon_bytecode::FunctionId;
 
@@ -731,6 +732,46 @@ pub(crate) struct IntlNumberFormatObject {
 }
 
 impl Trace for IntlNumberFormatObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.ordinary.trace(tracer);
+        self.payload.trace(tracer);
+        self.cached_bound_format.trace(tracer);
+    }
+}
+
+/// Provider-owned DateTimeFormat backend and resolved slots with no managed JavaScript edges.
+pub(crate) struct IntlDateTimeFormatPayload {
+    pub(crate) backend: Box<dyn IntlDateTimeFormatBackend>,
+    pub(crate) resolved: IntlDateTimeFormatResolved,
+}
+
+impl Trace for IntlDateTimeFormatPayload {
+    #[inline(always)]
+    fn trace(&mut self, _tracer: &mut dyn Tracer) {}
+}
+
+impl GcExternalMemory for IntlDateTimeFormatPayload {
+    fn external_memory_bytes(&self) -> usize {
+        size_of_val(&*self.backend)
+            .saturating_add(self.backend.external_memory_bytes())
+            .saturating_add(self.resolved.locale.len())
+            .saturating_add(self.resolved.calendar.len())
+            .saturating_add(self.resolved.numbering_system.len())
+            .saturating_add(self.resolved.time_zone.len())
+    }
+}
+
+/// Branded DateTimeFormat object with a lazily cached bound `format` function.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub(crate) struct IntlDateTimeFormatObject {
+    pub(crate) ordinary: OrdinaryObject,
+    pub(crate) payload: GcRef<IntlDateTimeFormatPayload>,
+    pub(crate) cached_bound_format: Value,
+}
+
+impl Trace for IntlDateTimeFormatObject {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.ordinary.trace(tracer);

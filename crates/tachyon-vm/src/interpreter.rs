@@ -5434,6 +5434,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::IntlCollatorConstructor) => {
                     return self.begin_intl_collator_constructor(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::IntlDateTimeFormatConstructor) => {
+                    return self.begin_intl_date_time_format_constructor(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::IntlNumberFormatConstructor) => {
                     return self.begin_intl_number_format_constructor(&site);
                 }
@@ -7986,6 +7989,34 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::IntlCollatorSupportedLocalesOf) => {
                     return self.begin_intl_collator_supported_locales_of(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlDateTimeFormatConstructor) => {
+                    return self.begin_intl_date_time_format_constructor(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlDateTimeFormatFormatGetter) => {
+                    return self.call_intl_date_time_format_format_getter(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlDateTimeFormatFormat) => {
+                    return self.call_intl_date_time_format_format(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlDateTimeFormatFormatToParts) => {
+                    return self.call_intl_date_time_format_format_to_parts(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlDateTimeFormatFormatRange) => {
+                    return self.call_intl_date_time_format_range(&site);
+                }
+                FunctionExecutable::Native(
+                    NativeFunction::IntlDateTimeFormatFormatRangeToParts,
+                ) => {
+                    return self.call_intl_date_time_format_range_to_parts(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlDateTimeFormatResolvedOptions) => {
+                    return self.call_intl_date_time_format_resolved_options(&site);
+                }
+                FunctionExecutable::Native(
+                    NativeFunction::IntlDateTimeFormatSupportedLocalesOf,
+                ) => {
+                    return self.call_intl_date_time_format_supported_locales_of(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::IntlNumberFormatConstructor) => {
                     return self.begin_intl_number_format_constructor(&site);
