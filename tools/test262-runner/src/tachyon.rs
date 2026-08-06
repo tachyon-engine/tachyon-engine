@@ -115,9 +115,9 @@ impl WallClockProvider for Test262WallClock {
     }
 }
 
-struct Test262UtcTimeZone;
+struct Test262TimeZone;
 
-impl TimeZoneProvider for Test262UtcTimeZone {
+impl TimeZoneProvider for Test262TimeZone {
     fn default_time_zone_identifier(&mut self) -> Result<Box<str>, HostProviderError> {
         Ok("UTC".into())
     }
@@ -135,6 +135,37 @@ impl TimeZoneProvider for Test262UtcTimeZone {
     ) -> Result<i64, HostProviderError> {
         Ok(local_milliseconds)
     }
+
+    fn offset_milliseconds_for_utc_in_zone(
+        &mut self,
+        identifier: &str,
+        _utc_milliseconds: i64,
+    ) -> Result<i64, HostProviderError> {
+        if identifier.eq_ignore_ascii_case("UTC") {
+            return Ok(0);
+        }
+        parse_etc_gmt_offset_minutes(identifier)
+            .map(|minutes| i64::from(minutes) * 60_000)
+            .ok_or(HostProviderError::Unavailable)
+    }
+}
+
+/// Parses deterministic fixed-offset IANA `Etc/GMT±H` identifiers for the Test262 host.
+fn parse_etc_gmt_offset_minutes(identifier: &str) -> Option<i32> {
+    let suffix = identifier.strip_prefix("Etc/GMT")?;
+    let (negative, hours) = if let Some(hours) = suffix.strip_prefix('+') {
+        (true, hours)
+    } else {
+        (false, suffix.strip_prefix('-')?)
+    };
+    if hours.is_empty() || hours.len() > 2 || !hours.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let hours = hours.parse::<i32>().ok()?;
+    if hours > 14 {
+        return None;
+    }
+    Some(if negative { -hours * 60 } else { hours * 60 })
 }
 
 /// Compiles and executes `$262.evalScript` in the realm selected by the host hook.
@@ -275,7 +306,7 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
         ),
         HostProviders::new()
             .with_wall_clock(Test262WallClock::default())
-            .with_time_zone(Test262UtcTimeZone)
+            .with_time_zone(Test262TimeZone)
             .with_intl(
                 Icu4xIntlProvider::try_new("en-US")
                     .expect("the fixed Test262 default locale must be valid"),
@@ -390,7 +421,7 @@ pub(super) fn run_agent_worker(
         ),
         HostProviders::new()
             .with_wall_clock(Test262WallClock::default())
-            .with_time_zone(Test262UtcTimeZone)
+            .with_time_zone(Test262TimeZone)
             .with_intl(
                 Icu4xIntlProvider::try_new("en-US")
                     .expect("the fixed Test262 default locale must be valid"),
@@ -948,12 +979,21 @@ fn unsupported(reason: impl Into<Box<str>>) -> EngineOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{TachyonAdapter, Test262WallClock};
+    use super::{TachyonAdapter, Test262WallClock, parse_etc_gmt_offset_minutes};
     use crate::{
         ComposedTest, EngineAdapter, EngineOutcome, ExecutionRequest, Phase, SourceUnit,
         TestVariant, VariantKind,
     };
     use tachyon_vm::WallClockProvider;
+
+    #[test]
+    fn deterministic_time_zone_provider_parses_etc_gmt_signs() {
+        assert_eq!(parse_etc_gmt_offset_minutes("Etc/GMT-3"), Some(180));
+        assert_eq!(parse_etc_gmt_offset_minutes("Etc/GMT+7"), Some(-420));
+        assert_eq!(parse_etc_gmt_offset_minutes("Etc/GMT-14"), Some(840));
+        assert_eq!(parse_etc_gmt_offset_minutes("Etc/GMT+15"), None);
+        assert_eq!(parse_etc_gmt_offset_minutes("UTC"), None);
+    }
 
     /// Builds one content-independent adapter fixture without touching the checkout or filesystem.
     fn composed(body: &str, preludes: &[(&str, &str)], is_async: bool) -> ComposedTest {

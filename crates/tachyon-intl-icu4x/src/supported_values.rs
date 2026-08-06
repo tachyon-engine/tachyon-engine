@@ -1,7 +1,7 @@
 //! Owned ECMA-402 capability enumeration backed by ICU data and pinned specification tables.
 
 use icu_time::zone::iana::IanaParserExtended;
-use tachyon_vm::IntlSupportedValuesKey;
+use tachyon_vm::{IntlSupportedValuesKey, canonicalize_offset_time_zone_identifier};
 
 /// Returns one owned capability list so the VM never borrows adapter or ICU storage across GC.
 pub(super) fn supported_values(key: IntlSupportedValuesKey) -> Box<[Box<str>]> {
@@ -22,6 +22,9 @@ pub(super) fn supported_values(key: IntlSupportedValuesKey) -> Box<[Box<str>]> {
 
 /// Finds the canonical primary time-zone spelling without exposing ICU iterator lifetimes.
 pub(super) fn canonical_time_zone(identifier: &str) -> Option<Box<str>> {
+    if let Some(offset) = canonicalize_offset_time_zone_identifier(identifier) {
+        return Some(offset);
+    }
     supported_time_zones()
         .into_vec()
         .into_iter()

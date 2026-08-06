@@ -293,12 +293,7 @@ impl Isolate {
         let formatter = self.intl_date_time_format_reference(formatter_value)?;
         let payload = self.intl_date_time_format_snapshot(formatter)?.payload;
         let time_zone = self.intl_date_time_format_resolved(formatter)?.time_zone;
-        let offset = self
-            .host_providers
-            .time_zone_mut()
-            .ok_or(ExecutionError::MissingTimeZoneProvider)?
-            .offset_milliseconds_for_utc_in_zone(&time_zone, milliseconds)
-            .map_err(ExecutionError::TimeZoneProvider)?;
+        let offset = self.intl_time_zone_offset_milliseconds(&time_zone, milliseconds)?;
         let input = IntlDateTimeInput {
             utc_milliseconds: milliseconds,
             offset_milliseconds: offset,
@@ -317,6 +312,22 @@ impl Isolate {
                 self.materialize_intl_date_time_parts(site, parts)
             }
         }
+    }
+
+    /// Resolves fixed offset identifiers in-engine and delegates named zones to the embedder.
+    pub(super) fn intl_time_zone_offset_milliseconds(
+        &mut self,
+        time_zone: &str,
+        utc_milliseconds: i64,
+    ) -> Result<i64, ExecutionError> {
+        if let Some(minutes) = crate::parse_offset_time_zone_minutes(time_zone) {
+            return Ok(i64::from(minutes) * 60_000);
+        }
+        self.host_providers
+            .time_zone_mut()
+            .ok_or(ExecutionError::MissingTimeZoneProvider)?
+            .offset_milliseconds_for_utc_in_zone(time_zone, utc_milliseconds)
+            .map_err(ExecutionError::TimeZoneProvider)
     }
 
     /// Allocates fixed traced state before a single formatting argument invokes JavaScript.

@@ -233,12 +233,8 @@ impl Isolate {
         time_zone: &str,
         utc_milliseconds: i64,
     ) -> Result<IntlDateTimeInput, ExecutionError> {
-        let offset_milliseconds = self
-            .host_providers
-            .time_zone_mut()
-            .ok_or(ExecutionError::MissingTimeZoneProvider)?
-            .offset_milliseconds_for_utc_in_zone(time_zone, utc_milliseconds)
-            .map_err(ExecutionError::TimeZoneProvider)?;
+        let offset_milliseconds =
+            self.intl_time_zone_offset_milliseconds(time_zone, utc_milliseconds)?;
         Ok(IntlDateTimeInput {
             utc_milliseconds,
             offset_milliseconds,

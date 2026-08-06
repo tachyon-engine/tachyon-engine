@@ -1,6 +1,9 @@
 //! ICU4X-locale-backed implementation of Tachyon's provider-neutral DateTimeFormat ABI.
 
-use icu_locale::Locale;
+use icu_locale::{
+    Locale,
+    extensions::unicode::{Key, Value},
+};
 use tachyon_vm::{
     HostProviderError, IntlDateTimeFormatBackend, IntlDateTimeFormatCreation,
     IntlDateTimeFormatOptions, IntlDateTimeFormatRequest, IntlDateTimeFormatResolved,
@@ -25,6 +28,11 @@ struct Icu4xDateTimeFormatBackend {
     time_zone: Box<str>,
     hour_cycle: IntlDateTimeHourCycle,
     options: IntlDateTimeFormatOptions,
+}
+
+struct MatchedLocale {
+    requested: Locale,
+    data_locale: Locale,
 }
 
 /// Mutable UTF-16 output shared by the string and parts entry points.
@@ -345,33 +353,36 @@ pub(super) fn create(
     default_locale: &str,
     mut request: IntlDateTimeFormatRequest,
 ) -> Result<IntlDateTimeFormatCreation, HostProviderError> {
-    let locale = request
+    let matched = request
         .locales
         .iter()
-        .find_map(|locale| supported_locale(locale))
-        .or_else(|| supported_locale(default_locale))
+        .find_map(|locale| match_locale(locale))
+        .or_else(|| match_locale(default_locale))
         .ok_or(DATA_FAILURE)?;
     let calendar = request.calendar.take().unwrap_or_else(|| "gregory".into());
     let numbering_system = request
         .numbering_system
         .take()
         .unwrap_or_else(|| "latn".into());
-    let locale_hour_cycle = if locale.starts_with("en-US") {
-        IntlDateTimeHourCycle::H12
-    } else {
-        IntlDateTimeHourCycle::H23
-    };
+    let extension_hour_cycle = unicode_keyword(&matched.requested, "hc")
+        .as_deref()
+        .and_then(parse_hour_cycle);
+    let locale_hour_cycle = default_hour_cycle(&matched.data_locale);
     let hour_cycle = match request.hour12 {
-        Some(true) => match locale_hour_cycle {
-            IntlDateTimeHourCycle::H11 | IntlDateTimeHourCycle::H23 => IntlDateTimeHourCycle::H11,
-            IntlDateTimeHourCycle::H12 | IntlDateTimeHourCycle::H24 => IntlDateTimeHourCycle::H12,
-        },
-        Some(false) => match locale_hour_cycle {
-            IntlDateTimeHourCycle::H11 | IntlDateTimeHourCycle::H23 => IntlDateTimeHourCycle::H23,
-            IntlDateTimeHourCycle::H12 | IntlDateTimeHourCycle::H24 => IntlDateTimeHourCycle::H24,
-        },
-        None => request.hour_cycle.unwrap_or(locale_hour_cycle),
+        Some(true) => hour_cycle12(&matched.data_locale),
+        Some(false) => IntlDateTimeHourCycle::H23,
+        None => request
+            .hour_cycle
+            .or(extension_hour_cycle)
+            .unwrap_or(locale_hour_cycle),
     };
+    let mut resolved_locale = matched.data_locale.clone();
+    if request.hour12.is_none()
+        && extension_hour_cycle == Some(hour_cycle)
+        && request.hour_cycle.is_none_or(|option| option == hour_cycle)
+    {
+        set_unicode_keyword(&mut resolved_locale, "hc", hour_cycle_name(hour_cycle))?;
+    }
     if !has_any_component(&request.options)
         && request.options.date_style.is_none()
         && request.options.time_style.is_none()
@@ -381,7 +392,7 @@ pub(super) fn create(
         request.options.day = Some(IntlDateTimeNumericStyle::Numeric);
     }
     let resolved = IntlDateTimeFormatResolved {
-        locale: locale.clone(),
+        locale: resolved_locale.to_string().into_boxed_str(),
         calendar: calendar.clone(),
         numbering_system: numbering_system.clone(),
         time_zone: request.time_zone.clone(),
@@ -391,7 +402,7 @@ pub(super) fn create(
     };
     Ok(IntlDateTimeFormatCreation {
         backend: Box::new(Icu4xDateTimeFormatBackend {
-            locale,
+            locale: matched.data_locale.to_string().into_boxed_str(),
             calendar,
             numbering_system,
             time_zone: request.time_zone,
@@ -409,19 +420,80 @@ pub(super) fn supported_locales(
 ) -> Box<[Box<str>]> {
     locales
         .iter()
-        .filter(|locale| supported_locale(locale).is_some())
+        .filter(|locale| match_locale(locale).is_some())
         .cloned()
         .collect::<Vec<_>>()
         .into_boxed_slice()
 }
 
-fn supported_locale(locale: &str) -> Option<Box<str>> {
-    let mut locale = locale.parse::<Locale>().ok()?;
-    locale.extensions = Default::default();
-    if matches!(locale.id.language.as_str(), "und" | "zxx") {
+fn match_locale(locale: &str) -> Option<MatchedLocale> {
+    let requested = locale.parse::<Locale>().ok()?;
+    let mut data_locale = requested.clone();
+    data_locale.extensions = Default::default();
+    if matches!(data_locale.id.language.as_str(), "und" | "zxx") {
         return None;
     }
-    Some(locale.to_string().into_boxed_str())
+    Some(MatchedLocale {
+        requested,
+        data_locale,
+    })
+}
+
+fn unicode_keyword(locale: &Locale, key: &str) -> Option<Box<str>> {
+    let key = key.parse::<Key>().ok()?;
+    locale
+        .extensions
+        .unicode
+        .keywords
+        .get(&key)
+        .map(|value| value.to_string().into_boxed_str())
+}
+
+fn set_unicode_keyword(
+    locale: &mut Locale,
+    key: &str,
+    value: &str,
+) -> Result<(), HostProviderError> {
+    let key = key.parse::<Key>().map_err(|_| DATA_FAILURE)?;
+    let value = value.parse::<Value>().map_err(|_| DATA_FAILURE)?;
+    locale.extensions.unicode.keywords.set(key, value);
+    Ok(())
+}
+
+#[inline(always)]
+fn parse_hour_cycle(value: &str) -> Option<IntlDateTimeHourCycle> {
+    match value {
+        "h11" => Some(IntlDateTimeHourCycle::H11),
+        "h12" => Some(IntlDateTimeHourCycle::H12),
+        "h23" => Some(IntlDateTimeHourCycle::H23),
+        "h24" => Some(IntlDateTimeHourCycle::H24),
+        _ => None,
+    }
+}
+
+#[inline(always)]
+const fn hour_cycle_name(value: IntlDateTimeHourCycle) -> &'static str {
+    match value {
+        IntlDateTimeHourCycle::H11 => "h11",
+        IntlDateTimeHourCycle::H12 => "h12",
+        IntlDateTimeHourCycle::H23 => "h23",
+        IntlDateTimeHourCycle::H24 => "h24",
+    }
+}
+
+fn default_hour_cycle(locale: &Locale) -> IntlDateTimeHourCycle {
+    match locale.id.language.as_str() {
+        "en" | "ar" | "hi" => IntlDateTimeHourCycle::H12,
+        _ => IntlDateTimeHourCycle::H23,
+    }
+}
+
+fn hour_cycle12(locale: &Locale) -> IntlDateTimeHourCycle {
+    if locale.id.language.as_str() == "ja" {
+        IntlDateTimeHourCycle::H11
+    } else {
+        IntlDateTimeHourCycle::H12
+    }
 }
 
 /// Converts Unix milliseconds to proleptic-Gregorian civil fields using Euclidean arithmetic.
@@ -599,8 +671,12 @@ mod tests {
     use super::*;
 
     fn request(options: IntlDateTimeFormatOptions) -> IntlDateTimeFormatRequest {
+        request_for("en-US", options)
+    }
+
+    fn request_for(locale: &str, options: IntlDateTimeFormatOptions) -> IntlDateTimeFormatRequest {
         IntlDateTimeFormatRequest {
-            locales: vec!["en-US".into()].into_boxed_slice(),
+            locales: vec![locale.into()].into_boxed_slice(),
             locale_matcher: IntlLocaleMatcher::BestFit,
             calendar: None,
             numbering_system: None,
@@ -662,6 +738,54 @@ mod tests {
         assert_eq!(
             supported_locales(&locales, IntlLocaleMatcher::Lookup).as_ref(),
             [Box::<str>::from("en-US"), Box::<str>::from("fr")]
+        );
+    }
+
+    #[test]
+    /// Covers hc extension retention, option precedence, and hour12 locale data selection.
+    fn resolves_hour_cycle_and_unicode_extension_precedence() {
+        let hour = IntlDateTimeFormatOptions {
+            hour: Some(IntlDateTimeNumericStyle::Numeric),
+            ..IntlDateTimeFormatOptions::default()
+        };
+        let extension = create("en-US", request_for("de-u-hc-h24", hour.clone())).unwrap();
+        assert_eq!(extension.resolved.locale.as_ref(), "de-u-hc-h24");
+        assert_eq!(
+            extension.resolved.hour_cycle,
+            Some(IntlDateTimeHourCycle::H24)
+        );
+
+        let mut different_option = request_for("de-u-hc-h24", hour.clone());
+        different_option.hour_cycle = Some(IntlDateTimeHourCycle::H23);
+        let different_option = create("en-US", different_option).unwrap();
+        assert_eq!(different_option.resolved.locale.as_ref(), "de");
+        assert_eq!(
+            different_option.resolved.hour_cycle,
+            Some(IntlDateTimeHourCycle::H23)
+        );
+
+        let mut same_option = request_for("de-u-hc-h24", hour.clone());
+        same_option.hour_cycle = Some(IntlDateTimeHourCycle::H24);
+        assert_eq!(
+            create("en-US", same_option)
+                .unwrap()
+                .resolved
+                .locale
+                .as_ref(),
+            "de-u-hc-h24"
+        );
+
+        let mut hour12 = request_for("ja-u-hc-h24", hour.clone());
+        hour12.hour12 = Some(true);
+        let hour12 = create("en-US", hour12).unwrap();
+        assert_eq!(hour12.resolved.locale.as_ref(), "ja");
+        assert_eq!(hour12.resolved.hour_cycle, Some(IntlDateTimeHourCycle::H11));
+
+        let mut hour24 = request_for("en-US", hour);
+        hour24.hour12 = Some(false);
+        assert_eq!(
+            create("en-US", hour24).unwrap().resolved.hour_cycle,
+            Some(IntlDateTimeHourCycle::H23)
         );
     }
 }

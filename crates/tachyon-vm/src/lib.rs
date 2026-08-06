@@ -86,6 +86,7 @@ mod string_raw;
 mod string_replace_all;
 mod string_split;
 mod tagged_template;
+mod time_zone;
 mod tuning;
 mod weak_collection;
 
@@ -128,6 +129,7 @@ pub use module::{
 pub use object::{ShapeError, SharedArrayBufferHandle};
 pub use runtime::{callable::NativeErrorKind, code::CodeId};
 pub use string::{JsString, JsStringView, StringAllocationError, StringRepresentationTag};
+pub use time_zone::{canonicalize_offset_time_zone_identifier, parse_offset_time_zone_minutes};
 
 use core::{cell::Cell, num::NonZeroU32, ptr::NonNull};
 
