@@ -156,6 +156,22 @@ returned === undefined && target[0] === 0 && target[1] === 1 &&
   target[length - 2] === length - 2 && target[length - 1] === length - 1;
 "#;
 
+const TYPED_ARRAY_SET_OBJECT_OFFSET_SOURCE: &str = r#"
+function sample(offset) {
+  var target = new BigInt64Array([1n, 2n]);
+  target.set([42n], offset);
+  return target[0] === 42n && target[1] === 2n;
+}
+function shifted(offset) {
+  var target = new BigInt64Array([1n, 2n]);
+  target.set([42n], offset);
+  return target[0] === 1n && target[1] === 42n;
+}
+sample({}) && sample([]) && sample([0]) && shifted([1]) &&
+  shifted({ valueOf: function() { return 1; } }) &&
+  shifted({ toString: function() { return 1; } });
+"#;
+
 #[test]
 fn typed_array_set_works_for_every_dispatch_batch() {
     assert_typed_array_set::<1>(TYPED_ARRAY_SET_SOURCE, false);
@@ -168,6 +184,15 @@ fn typed_array_set_works_for_every_dispatch_batch() {
 #[test]
 fn typed_array_set_observable_state_survives_forced_major_collection() {
     assert_typed_array_set::<8>(TYPED_ARRAY_SET_OBSERVABLE_SOURCE, true);
+}
+
+#[test]
+fn typed_array_set_object_offsets_use_ordinary_to_primitive() {
+    assert_typed_array_set::<1>(TYPED_ARRAY_SET_OBJECT_OFFSET_SOURCE, false);
+    assert_typed_array_set::<2>(TYPED_ARRAY_SET_OBJECT_OFFSET_SOURCE, false);
+    assert_typed_array_set::<4>(TYPED_ARRAY_SET_OBJECT_OFFSET_SOURCE, false);
+    assert_typed_array_set::<8>(TYPED_ARRAY_SET_OBJECT_OFFSET_SOURCE, false);
+    assert_typed_array_set::<16>(TYPED_ARRAY_SET_OBJECT_OFFSET_SOURCE, false);
 }
 
 #[test]

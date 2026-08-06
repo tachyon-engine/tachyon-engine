@@ -125,6 +125,9 @@ if (!(throws(TypeError, function() { return 1n + 1; }) &&
 if (!(postfix === 1n && prefix === 3n && updated === 3n &&
       updated-- === 3n && --updated === 1n)) failure = 8;
 if (!(10n < 11 && 10n <= 10 && 10n > 9 && 10n >= 10 &&
+      40n < 41n && 41n > 40n && 41n <= 41n && 41n >= 41n &&
+      -42n < -41n && -41n > -42n &&
+      huge > mask && mask < huge && huge >= huge && mask <= mask &&
       9007199254740993n > 9007199254740992 &&
       9007199254740993n < 9007199254740994 &&
       -2n < -1.5 && -1n > -1.5 && !(1n < NaN))) failure = 9;

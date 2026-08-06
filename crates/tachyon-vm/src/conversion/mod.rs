@@ -2202,11 +2202,15 @@ impl Isolate {
                 Immediate::False
             }));
         }
-        let ordering = if self.is_bigint_value(left) {
+        let left_bigint = self.is_bigint_value(left);
+        let right_bigint = self.is_bigint_value(right);
+        let ordering = if left_bigint && right_bigint {
+            Some(self.bigint_compare(left, right)?)
+        } else if left_bigint {
             let right = numeric_value(self.convert_to_number(right)?)
                 .ok_or(ExecutionError::UnsupportedNumberConversion(right))?;
             self.bigint_compare_number(left, right)?
-        } else if self.is_bigint_value(right) {
+        } else if right_bigint {
             let left = numeric_value(self.convert_to_number(left)?)
                 .ok_or(ExecutionError::UnsupportedNumberConversion(left))?;
             self.bigint_compare_number(right, left)?

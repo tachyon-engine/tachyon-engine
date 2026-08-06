@@ -95,6 +95,9 @@ var detachedTargetResult = targetSource.map(function(value, index) {
 var bigintObjectMapped = new BigInt64Array([1n]).map(function() {
   return { valueOf: function() { return 7n; } };
 });
+var bigintFilteredByValue = new BigInt64Array([41n, 1n, 42n, 7n]).filter(function(value) {
+  return value > 40n;
+});
 var mapMismatch = throwsTypeError(function() {
   var value = new BigInt64Array(0);
   value.constructor = { [Symbol.species]: Int8Array };
@@ -122,7 +125,9 @@ mapSpeciesResult.length === 3 && mapSpeciesResult[0] === 5 && mapSpeciesResult[1
 order === "123sc" && filterSpeciesLength === 2 && filterSpeciesResult instanceof Uint16Array &&
 filterSpeciesResult.join(",") === "1,3" && detachedCalls === 3 &&
 detachedMapped.join(",") === "1,9,9" && detachedTargetResult === detachedTarget &&
-detachedTarget.length === 0 && bigintObjectMapped[0] === 7n && mapMismatch && filterMismatch &&
+detachedTarget.length === 0 && bigintObjectMapped[0] === 7n &&
+bigintFilteredByValue.length === 2 && bigintFilteredByValue[0] === 41n &&
+bigintFilteredByValue[1] === 42n && mapMismatch && filterMismatch &&
 shortMap && shortFilter && Uint8Array.prototype.map.length === 1 &&
 Uint8Array.prototype.filter.length === 1;
 "#;
@@ -173,8 +178,12 @@ fn assert_typed_array_transform<const N: usize>(forced_major: bool) {
             },
         )
         .expect("TypedArray transform fixture executes");
+    let thrown_kind = match outcome {
+        RunOutcome::Thrown(value) => isolate.native_error_kind(value).unwrap(),
+        _ => None,
+    };
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
-        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}, kind={thrown_kind:?}"
     );
 }

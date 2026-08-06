@@ -288,6 +288,27 @@ impl BigIntValue {
         }
     }
 
+    /// Compares against one immediate BigInt without allocating a temporary limb box.
+    #[inline(always)]
+    fn mathematical_cmp_i64(&self, other: i64) -> core::cmp::Ordering {
+        let other_negative = other.is_negative();
+        match (self.negative, other_negative) {
+            (true, false) => return core::cmp::Ordering::Less,
+            (false, true) => return core::cmp::Ordering::Greater,
+            _ => {}
+        }
+        let magnitude = match self.limbs.as_ref() {
+            [] => 0_u64.cmp(&other.unsigned_abs()),
+            [limb] => limb.cmp(&other.unsigned_abs()),
+            [_, _, ..] => core::cmp::Ordering::Greater,
+        };
+        if self.negative {
+            magnitude.reverse()
+        } else {
+            magnitude
+        }
+    }
+
     /// Adds two canonical values with one exact result-capacity allocation.
     fn add(&self, other: &Self) -> Result<Self, BigIntArithmeticError> {
         if self.negative == other.negative {
@@ -1136,6 +1157,57 @@ impl Isolate {
                     .borrow(right, self.types.bigint)
                     .map_err(ExecutionError::NoGcBorrow)?;
                 Ok(left == right)
+            })
+        })
+    }
+
+    /// Compares two already-classified BigInts without converting through Number.
+    pub(crate) fn bigint_compare(
+        &mut self,
+        left: Value,
+        right: Value,
+    ) -> Result<core::cmp::Ordering, ExecutionError> {
+        match (left.as_small_bigint(), right.as_small_bigint()) {
+            (Some(left), Some(right)) => return Ok(left.cmp(&right)),
+            (Some(left), None) => {
+                let right = self.bigint_reference(right)?;
+                return self.heap.with_running_scope(|scope| {
+                    let right = scope.root(right).map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        no_gc
+                            .borrow(right, self.types.bigint)
+                            .map(|right| right.mathematical_cmp_i64(left).reverse())
+                            .map_err(ExecutionError::NoGcBorrow)
+                    })
+                });
+            }
+            (None, Some(right)) => {
+                let left = self.bigint_reference(left)?;
+                return self.heap.with_running_scope(|scope| {
+                    let left = scope.root(left).map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        no_gc
+                            .borrow(left, self.types.bigint)
+                            .map(|left| left.mathematical_cmp_i64(right))
+                            .map_err(ExecutionError::NoGcBorrow)
+                    })
+                });
+            }
+            (None, None) => {}
+        }
+        let left = self.bigint_reference(left)?;
+        let right = self.bigint_reference(right)?;
+        self.heap.with_running_scope(|scope| {
+            let left = scope.root(left).map_err(ExecutionError::Root)?;
+            let right = scope.root(right).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let left = no_gc
+                    .borrow(left, self.types.bigint)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                let right = no_gc
+                    .borrow(right, self.types.bigint)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                Ok(left.mathematical_cmp(right))
             })
         })
     }

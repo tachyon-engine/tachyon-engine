@@ -142,6 +142,11 @@ impl Isolate {
         let target = self.typed_array_snapshot(pending.values[SET_TARGET])?;
         self.typed_array_backing(target.buffer)?;
         self.set_typed_array_set_scalar(state, SET_LENGTH, target.length as u64)?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
         let source = self.coerce_to_object(pending.values[SET_SOURCE])?;
         let state =
             self.native_call_state_reference(self.read(site.caller_base, site.destination)?)?;
