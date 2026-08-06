@@ -576,10 +576,9 @@ fn drive_test262_work(
                         )));
                     }
                 },
-                Err(_) => {
-                    let reason = match isolate
-                        .create_native_error(tachyon_vm::NativeErrorKind::Type, None)
-                    {
+                Err(error) => {
+                    let kind = dynamic_import_error_kind(error);
+                    let reason = match isolate.create_native_error(kind, None) {
                         Ok(reason) => reason,
                         Err(error) => {
                             return Some(unsupported(format!(
@@ -661,6 +660,20 @@ fn drive_test262_work(
         )
         .into(),
     })
+}
+
+/// Maps in-memory dynamic-import failures to the ECMAScript rejection constructor.
+fn dynamic_import_error_kind(
+    error: ModuleLoadError<Test262ModuleLoaderError>,
+) -> tachyon_vm::NativeErrorKind {
+    match error {
+        ModuleLoadError::Graph(ModuleError::MissingExport | ModuleError::AmbiguousExport)
+        | ModuleLoadError::Loader(Test262ModuleLoaderError::Compile(CompileError::Diagnostics(
+            _,
+        ))) => tachyon_vm::NativeErrorKind::Syntax,
+        ModuleLoadError::Graph(_) | ModuleLoadError::Loader(_) => tachyon_vm::NativeErrorKind::Type,
+        ModuleLoadError::Missing(_) => tachyon_vm::NativeErrorKind::Type,
+    }
 }
 
 #[derive(Default)]
