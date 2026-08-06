@@ -2636,6 +2636,7 @@ pub(crate) struct VmTypes {
     pub(crate) intl_collator_backend: GcType<IntlCollatorBackendPayload>,
     pub(crate) intl_collator_object: GcType<IntlCollatorObject>,
     pub(crate) pending_intl_collator: GcType<PendingIntlCollator>,
+    pub(crate) pending_intl_number_format: GcType<PendingIntlNumberFormat>,
     pub(crate) intl_number_format_payload: GcType<IntlNumberFormatPayload>,
     pub(crate) intl_number_format_object: GcType<IntlNumberFormatObject>,
     pub(crate) proxy_object: GcType<ProxyObject>,
@@ -2812,6 +2813,9 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidLocaleListElement(_)
         | ExecutionError::IncompatibleIntlCollatorReceiver(_)
         | ExecutionError::IncompatibleIntlNumberFormatReceiver(_)
+        | ExecutionError::MissingIntlNumberFormatCurrency
+        | ExecutionError::MissingIntlNumberFormatUnit
+        | ExecutionError::InvalidIntlNumberFormatRoundingIncrementCombination
         | ExecutionError::TypedArraySpeciesResultTooShort
         | ExecutionError::DetachedArrayBuffer
         | ExecutionError::FixedLengthSharedArrayBuffer
@@ -2842,6 +2846,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidNormalizationForm
         | ExecutionError::InvalidIntlSupportedValuesKey
         | ExecutionError::InvalidIntlCollatorOption
+        | ExecutionError::InvalidIntlNumberFormatOption
         | ExecutionError::InvalidLanguageTag => Some(NativeErrorKind::Range),
         ExecutionError::InvalidUriEncoding => Some(NativeErrorKind::Uri),
         _ => None,

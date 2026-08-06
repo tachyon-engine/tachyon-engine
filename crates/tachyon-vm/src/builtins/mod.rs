@@ -14,6 +14,7 @@ mod global;
 mod intl;
 mod intl_collator;
 mod intl_number_format;
+mod intl_number_format_options;
 mod json;
 mod map_upsert;
 mod math;
@@ -32,6 +33,7 @@ mod weak_ref;
 
 pub(crate) use date::PendingDateNumericArguments;
 pub(crate) use intl_collator::PendingIntlCollator;
+pub(crate) use intl_number_format_options::PendingIntlNumberFormat;
 pub(crate) use json::PendingJsonStringify;
 pub(crate) use math::{math_variadic_add, math_variadic_finish, math_variadic_initial};
 pub(crate) use regexp::advance_regexp_split_index;

@@ -356,6 +356,9 @@ pub(crate) enum ConversionConsumer {
     IntlLocaleListElement,
     IntlSupportedValuesKey,
     IntlCollatorOption,
+    IntlNumberFormatStringOption,
+    IntlNumberFormatNumberOption,
+    IntlNumberFormatValue,
     IntlCollatorCompareLeft,
     IntlCollatorCompareRight,
     JsonParseText,
@@ -515,6 +518,9 @@ impl ConversionConsumer {
             | Self::IntlLocaleListElement
             | Self::IntlSupportedValuesKey
             | Self::IntlCollatorOption
+            | Self::IntlNumberFormatStringOption
+            | Self::IntlNumberFormatNumberOption
+            | Self::IntlNumberFormatValue
             | Self::IntlCollatorCompareLeft
             | Self::IntlCollatorCompareRight
             | Self::JsonParseText
@@ -669,6 +675,7 @@ impl ConversionConsumer {
                 | Self::IntlLocaleListElement
                 | Self::IntlSupportedValuesKey
                 | Self::IntlCollatorOption
+                | Self::IntlNumberFormatStringOption
                 | Self::IntlCollatorCompareLeft
                 | Self::IntlCollatorCompareRight
                 | Self::JsonParseText
@@ -758,6 +765,9 @@ impl ConversionConsumer {
                 | Self::IntlLocaleListElement
                 | Self::IntlSupportedValuesKey
                 | Self::IntlCollatorOption
+                | Self::IntlNumberFormatStringOption
+                | Self::IntlNumberFormatNumberOption
+                | Self::IntlNumberFormatValue
                 | Self::IntlCollatorCompareLeft
                 | Self::IntlCollatorCompareRight
                 | Self::JsonParseText
@@ -892,6 +902,7 @@ pub(crate) enum PropertyCallbackMode {
     ArrayIteratorElement,
     ArgumentList,
     IntlCollator,
+    IntlNumberFormat,
     CopyDataProperties,
     DefineProperties,
 }
@@ -1746,11 +1757,36 @@ pub(crate) enum IntlCollatorStage {
     IgnorePunctuation,
 }
 
-/// Observable boundary after NumberFormat locale canonicalization.
+/// Observable boundaries in NumberFormat locale negotiation and option processing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum IntlNumberFormatStage {
     Locales,
+    LocaleMatcher,
+    NumberingSystem,
+    Style,
+    Currency,
+    CurrencyDisplay,
+    CurrencySign,
+    Unit,
+    UnitDisplay,
+    Notation,
+    MinimumIntegerDigits,
+    MinimumFractionDigits,
+    MaximumFractionDigits,
+    MinimumSignificantDigits,
+    MaximumSignificantDigits,
+    RoundingIncrement,
+    RoundingMode,
+    RoundingPriority,
+    TrailingZeroDisplay,
+    ConvertMinimumSignificantDigits,
+    ConvertMaximumSignificantDigits,
+    ConvertMinimumFractionDigits,
+    ConvertMaximumFractionDigits,
+    CompactDisplay,
+    UseGrouping,
+    SignDisplay,
 }
 
 /// Observable boundaries in the Async-from-Sync iterator algorithms.
@@ -1934,6 +1970,21 @@ impl NativeContinuation {
             kind: NativeContinuationKind::IntlNumberFormat(stage),
             first: state,
             second: retained,
+        }
+    }
+
+    /// Roots NumberFormat option state while an ordinary accessor callback executes JavaScript.
+    #[inline]
+    pub(crate) const fn intl_number_format_property_get(
+        site: NativeContinuationSite,
+        state: Value,
+        options: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PropertyGet(PropertyCallbackMode::IntlNumberFormat),
+            first: state,
+            second: options,
         }
     }
 

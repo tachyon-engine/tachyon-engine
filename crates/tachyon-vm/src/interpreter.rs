@@ -2446,7 +2446,10 @@ impl Isolate {
                 } else if mode == PropertyCallbackMode::ArgumentList {
                     let state = self.pending_argument_list_reference(continuation.first())?;
                     self.pending_argument_list_source(state)?
-                } else if mode == PropertyCallbackMode::IntlCollator {
+                } else if matches!(
+                    mode,
+                    PropertyCallbackMode::IntlCollator | PropertyCallbackMode::IntlNumberFormat
+                ) {
                     continuation.second()
                 } else {
                     receiver
@@ -8751,6 +8754,11 @@ impl Isolate {
                         let state = self.pending_intl_collator_reference(continuation.first())?;
                         let stage = self.pending_intl_collator_stage(state)?;
                         self.resume_intl_collator(continuation, stage, value)
+                    } else if mode == PropertyCallbackMode::IntlNumberFormat {
+                        let state =
+                            self.pending_intl_number_format_reference(continuation.first())?;
+                        let stage = self.pending_intl_number_format_stage(state)?;
+                        self.resume_intl_number_format(continuation, stage, value)
                     } else if mode == PropertyCallbackMode::Descriptor {
                         let state =
                             self.pending_property_descriptor_reference(continuation.first())?;

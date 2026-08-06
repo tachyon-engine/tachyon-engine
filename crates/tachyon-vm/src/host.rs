@@ -448,6 +448,7 @@ pub struct IntlNumberFormatResolved {
 #[derive(Clone, Debug, PartialEq)]
 pub enum IntlMathematicalValue {
     Finite(Box<str>),
+    NegativeZero,
     PositiveInfinity,
     NegativeInfinity,
     NaN,

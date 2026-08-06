@@ -432,6 +432,14 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::IntlNumberFormatValue {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_intl_number_format_value_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::SetRecordSize {
                         let state = self.pending_set_operation_reference(continuation.receiver)?;
                         return self.resume_set_size_conversion(continuation.site, state, value);
@@ -583,6 +591,19 @@ impl Isolate {
                             continuation.site,
                             state,
                             string,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::IntlNumberFormatStringOption
+                            | ConversionConsumer::IntlNumberFormatNumberOption
+                    ) {
+                        let state =
+                            self.pending_intl_number_format_reference(continuation.receiver)?;
+                        return self.resume_intl_number_format_option_primitive(
+                            continuation.site,
+                            state,
+                            value,
                         );
                     }
                     if matches!(
@@ -1636,6 +1657,15 @@ impl Isolate {
                 }
                 ConversionConsumer::IntlCollatorOption => {
                     unreachable!("Intl.Collator option conversion resumes inside its state machine")
+                }
+                ConversionConsumer::IntlNumberFormatStringOption
+                | ConversionConsumer::IntlNumberFormatNumberOption => {
+                    unreachable!(
+                        "Intl.NumberFormat option conversion resumes inside its state machine"
+                    )
+                }
+                ConversionConsumer::IntlNumberFormatValue => {
+                    unreachable!("NumberFormat value conversion resumes inside its state machine")
                 }
                 ConversionConsumer::IntlCollatorCompareLeft
                 | ConversionConsumer::IntlCollatorCompareRight => {

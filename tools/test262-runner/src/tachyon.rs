@@ -1088,6 +1088,57 @@ mod tests {
     }
 
     #[test]
+    /// Preserves getter exception identity across every ordered NumberFormat option boundary.
+    fn number_format_option_getters_propagate_original_exceptions() {
+        let source = r#"
+            function CustomError() {}
+            function assertThrows(callback) {
+              try { callback(); } catch (error) {
+                if (error && error.constructor === CustomError) return;
+                throw new Error("wrong constructor");
+              }
+              throw new Error("no exception");
+            }
+            for (const option of [
+              "localeMatcher", "numberingSystem", "style", "currency",
+              "currencyDisplay", "currencySign", "unit", "unitDisplay", "notation",
+              "minimumIntegerDigits", "minimumFractionDigits", "maximumFractionDigits",
+              "minimumSignificantDigits", "maximumSignificantDigits", "roundingIncrement",
+              "roundingMode", "roundingPriority", "trailingZeroDisplay", "compactDisplay",
+              "useGrouping", "signDisplay"
+            ]) {
+              assertThrows(() => new Intl.NumberFormat("en", {
+                get [option]() { throw new CustomError(); }
+              }));
+            }
+        "#;
+        assert_eq!(
+            execute(&composed(source, &[], false)),
+            EngineOutcome::Completed
+        );
+    }
+
+    #[test]
+    /// Reads all raw digit properties but converts only the group selected by roundingPriority.
+    fn number_format_digit_conversion_is_delayed_and_selective() {
+        let source = r#"
+            const calls = [];
+            const options = {
+              minimumFractionDigits: { valueOf() { calls.push("fraction"); return 2; } },
+              minimumSignificantDigits: { valueOf() { calls.push("significant"); return 3; } }
+            };
+            const resolved = new Intl.NumberFormat("en", options).resolvedOptions();
+            if (calls.join(",") !== "significant") throw new Error("wrong conversion order");
+            if (resolved.minimumSignificantDigits !== 3 ||
+                "minimumFractionDigits" in resolved) throw new Error("wrong selected slots");
+        "#;
+        assert_eq!(
+            execute(&composed(source, &[], false)),
+            EngineOutcome::Completed
+        );
+    }
+
+    #[test]
     /// Covers source/message conversion, SAB identity, report FIFO, and normal worker teardown.
     fn adapter_agents_share_sab_and_report_without_leaking_workers() {
         let mut test = composed(

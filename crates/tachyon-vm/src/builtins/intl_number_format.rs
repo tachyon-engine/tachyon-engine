@@ -2,16 +2,12 @@
 
 use super::super::*;
 
-const NUMBER_FORMAT_NEW_TARGET: usize = 0;
-const NUMBER_FORMAT_OPTIONS: usize = 1;
-const NUMBER_FORMAT_LOCALES: usize = 2;
-
-struct IntlNumberFormatStateRoots<'a> {
+struct IntlNumberFormatValueRoots<'a> {
     vm: VmRoots<'a>,
     state: NativeCallState,
 }
 
-impl Trace for IntlNumberFormatStateRoots<'_> {
+impl Trace for IntlNumberFormatValueRoots<'_> {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.vm.trace(tracer);
@@ -39,37 +35,12 @@ impl Trace for IntlNumberFormatBoundRoots<'_> {
 }
 
 impl Isolate {
-    /// Canonicalizes locales before provider construction; option expansion follows this substrate.
+    /// Starts locale canonicalization before the resumable NumberFormat option pipeline.
     pub(crate) fn begin_intl_number_format_constructor(
         &mut self,
         site: &CallSite,
     ) -> Result<(), ExecutionError> {
-        let undefined = Value::from_immediate(Immediate::Undefined);
-        let locales = self.call_argument(site, 0)?.unwrap_or(undefined);
-        let options = self.call_argument(site, 1)?.unwrap_or(undefined);
-        let new_target = if self.is_object_value(site.new_target) {
-            site.new_target
-        } else {
-            site.callee
-        };
-        let state = self.allocate_intl_number_format_state(NativeCallState {
-            values: [new_target, options, undefined, undefined, undefined],
-            count: 1,
-        })?;
-        let continuation_site = NativeContinuationSite {
-            caller_base: site.caller_base,
-            destination: site.destination,
-            call_site: site.call_site,
-        };
-        self.dispatch_intl_number_format_nested(
-            NativeContinuation::intl_number_format(
-                continuation_site,
-                IntlNumberFormatStage::Locales,
-                Value::from_heap_ref(state.raw()),
-                locales,
-            ),
-            |isolate| isolate.begin_intl_get_canonical_locales(site),
-        )
+        self.start_intl_number_format_constructor(site)
     }
 
     /// Canonicalizes requested locales before provider capability filtering.
@@ -77,27 +48,7 @@ impl Isolate {
         &mut self,
         site: &CallSite,
     ) -> Result<(), ExecutionError> {
-        let undefined = Value::from_immediate(Immediate::Undefined);
-        let locales = self.call_argument(site, 0)?.unwrap_or(undefined);
-        let options = self.call_argument(site, 1)?.unwrap_or(undefined);
-        let state = self.allocate_intl_number_format_state(NativeCallState {
-            values: [undefined, options, undefined, undefined, undefined],
-            count: 0,
-        })?;
-        let continuation_site = NativeContinuationSite {
-            caller_base: site.caller_base,
-            destination: site.destination,
-            call_site: site.call_site,
-        };
-        self.dispatch_intl_number_format_nested(
-            NativeContinuation::intl_number_format(
-                continuation_site,
-                IntlNumberFormatStage::Locales,
-                Value::from_heap_ref(state.raw()),
-                locales,
-            ),
-            |isolate| isolate.begin_intl_get_canonical_locales(site),
-        )
+        self.start_intl_number_format_supported_locales_of(site)
     }
 
     /// Completes the locale stage for construction or supportedLocalesOf.
@@ -107,96 +58,7 @@ impl Isolate {
         stage: IntlNumberFormatStage,
         value: Value,
     ) -> Result<(), ExecutionError> {
-        if stage != IntlNumberFormatStage::Locales {
-            return Err(ExecutionError::MissingNativeContinuation);
-        }
-        let state = self.native_call_state_reference(continuation.first())?;
-        self.update_native_call_state_value(state, NUMBER_FORMAT_LOCALES, value)?;
-        if self.native_call_state_snapshot(state)?.count == 0 {
-            self.finish_intl_number_format_supported_locales(continuation.site(), state)
-        } else {
-            self.finish_intl_number_format_construction(continuation.site(), state)
-        }
-    }
-
-    /// Constructs the first default-decimal NumberFormat object through the provider ABI.
-    fn finish_intl_number_format_construction(
-        &mut self,
-        site: NativeContinuationSite,
-        state: GcRef<NativeCallState>,
-    ) -> Result<(), ExecutionError> {
-        let snapshot = self.native_call_state_snapshot(state)?;
-        let options = snapshot.values[NUMBER_FORMAT_OPTIONS];
-        if options.as_immediate() != Some(Immediate::Undefined) {
-            self.coerce_to_object(options)?;
-        }
-        let locales = self.intl_locale_strings(snapshot.values[NUMBER_FORMAT_LOCALES])?;
-        let creation = self
-            .host_providers
-            .intl_mut()
-            .ok_or(ExecutionError::MissingIntlProvider)?
-            .create_number_format(IntlNumberFormatRequest {
-                locales,
-                options: IntlNumberFormatOptions::default(),
-                ..Default::default()
-            })
-            .map_err(ExecutionError::IntlProvider)?;
-        let prototype_atom = self.prototype_atom()?;
-        let default_prototype = self
-            .realm
-            .intl_number_format_prototype
-            .expect("Intl.NumberFormat prototype initializes before construction");
-        let new_target = snapshot.values[NUMBER_FORMAT_NEW_TARGET];
-        let prototype = self
-            .constructor_prototype_value(new_target, prototype_atom)?
-            .filter(|value| self.is_object_value(*value))
-            .or_else(|| {
-                self.realm_for_callable(new_target).ok().and_then(|realm| {
-                    self.realm_intrinsic_prototype(realm, IntrinsicPrototypeKind::IntlNumberFormat)
-                })
-            })
-            .unwrap_or(default_prototype);
-        let number_format =
-            self.allocate_intl_number_format_object(creation, prototype, AllocationSpace::Young)?;
-        self.write(site.caller_base, site.destination, number_format)
-    }
-
-    /// Filters provider-supported locales and materializes a fresh intrinsic Array.
-    fn finish_intl_number_format_supported_locales(
-        &mut self,
-        site: NativeContinuationSite,
-        state: GcRef<NativeCallState>,
-    ) -> Result<(), ExecutionError> {
-        let snapshot = self.native_call_state_snapshot(state)?;
-        let options = snapshot.values[NUMBER_FORMAT_OPTIONS];
-        if options.as_immediate() != Some(Immediate::Undefined) {
-            self.coerce_to_object(options)?;
-        }
-        let locales = self.intl_locale_strings(snapshot.values[NUMBER_FORMAT_LOCALES])?;
-        let supported = self
-            .host_providers
-            .intl_mut()
-            .ok_or(ExecutionError::MissingIntlProvider)?
-            .number_format_supported_locales(&locales, IntlLocaleMatcher::BestFit)
-            .map_err(ExecutionError::IntlProvider)?;
-        let result = self.create_array_object_with_prototype(
-            self.realm
-                .array_prototype
-                .expect("Array prototype initializes before Intl.NumberFormat"),
-        )?;
-        self.write(site.caller_base, site.destination, result)?;
-        for (index, locale) in supported.into_vec().into_iter().enumerate() {
-            let result = self.read(site.caller_base, site.destination)?;
-            let (locale, result) = self.allocate_runtime_string_retaining(
-                JsString::try_from_str(&locale).map_err(ExecutionError::PropertyKeyString)?,
-                result,
-            )?;
-            self.write(site.caller_base, site.destination, result)?;
-            let index = u32::try_from(index).map_err(|_| ExecutionError::ArrayLengthOverflow)?;
-            let key = self.property_key_atom(safe_integer_value(u64::from(index)))?;
-            self.set_own_data_property(result, key, locale)?;
-        }
-        Ok(())
+        self.resume_pending_intl_number_format(continuation, stage, value)
     }
 
     /// Returns one cached anonymous bound formatter after enforcing the receiver brand.
@@ -223,10 +85,60 @@ impl Isolate {
         &mut self,
         site: &CallSite,
     ) -> Result<(), ExecutionError> {
-        let number_format = self.intl_number_format_reference(site.this_value)?;
+        self.intl_number_format_reference(site.this_value)?;
         let value = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if self.is_object_value(value) {
+            let state = self.allocate_intl_number_format_value_state(NativeCallState {
+                values: [
+                    site.this_value,
+                    Value::from_immediate(Immediate::Undefined),
+                    Value::from_immediate(Immediate::Undefined),
+                    Value::from_immediate(Immediate::Undefined),
+                    Value::from_immediate(Immediate::Undefined),
+                ],
+                count: 0,
+            })?;
+            return self.dispatch_object_primitive_conversion(
+                ConversionConsumer::IntlNumberFormatValue,
+                site.caller_base,
+                site.destination,
+                Value::from_heap_ref(state.raw()),
+                value,
+                site.call_site,
+            );
+        }
+        self.finish_intl_number_format_format(
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+            site.this_value,
+            value,
+        )
+    }
+
+    /// Continues ToIntlMathematicalValue after an object argument produced its primitive.
+    pub(crate) fn resume_intl_number_format_value_conversion(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        primitive: Value,
+    ) -> Result<(), ExecutionError> {
+        let number_format = self.native_call_state_snapshot(state)?.values[0];
+        self.finish_intl_number_format_format(site, number_format, primitive)
+    }
+
+    /// Formats one primitive value through the immutable provider backend.
+    fn finish_intl_number_format_format(
+        &mut self,
+        site: NativeContinuationSite,
+        number_format: Value,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let number_format = self.intl_number_format_reference(number_format)?;
         let input = self.intl_mathematical_value(value)?;
         let payload = self.intl_number_format_snapshot(number_format)?.payload;
         let formatted = self.heap.with_running_scope(|scope| {
@@ -246,80 +158,12 @@ impl Isolate {
         self.write(site.caller_base, site.destination, result)
     }
 
-    /// Publishes a fresh resolved-options object in ECMA-402 property order.
-    pub(crate) fn call_intl_number_format_resolved_options(
-        &mut self,
-        site: &CallSite,
-    ) -> Result<(), ExecutionError> {
-        let number_format = self.intl_number_format_reference(site.this_value)?;
-        let resolved = self.intl_number_format_resolved(number_format)?;
-        let result = self.create_ordinary_object()?;
-        self.write(site.caller_base, site.destination, result)?;
-        self.set_intl_number_format_string(result, b"locale", resolved.locale.as_bytes())?;
-        self.set_intl_number_format_string(
-            result,
-            b"numberingSystem",
-            resolved.numbering_system.as_bytes(),
-        )?;
-        self.set_intl_number_format_string(result, b"style", b"decimal")?;
-        self.set_intl_number_format_number(
-            result,
-            b"minimumIntegerDigits",
-            u32::from(resolved.options.minimum_integer_digits),
-        )?;
-        if let Some(value) = resolved.options.minimum_fraction_digits {
-            self.set_intl_number_format_number(result, b"minimumFractionDigits", u32::from(value))?;
-        }
-        if let Some(value) = resolved.options.maximum_fraction_digits {
-            self.set_intl_number_format_number(result, b"maximumFractionDigits", u32::from(value))?;
-        }
-        self.set_intl_number_format_string(result, b"useGrouping", b"auto")?;
-        self.set_intl_number_format_string(result, b"notation", b"standard")?;
-        self.set_intl_number_format_string(result, b"signDisplay", b"auto")?;
-        self.set_intl_number_format_number(
-            result,
-            b"roundingIncrement",
-            u32::from(resolved.options.rounding_increment),
-        )?;
-        self.set_intl_number_format_string(result, b"roundingMode", b"halfExpand")?;
-        self.set_intl_number_format_string(result, b"roundingPriority", b"auto")?;
-        self.set_intl_number_format_string(result, b"trailingZeroDisplay", b"auto")
-    }
-
-    /// Drains a synchronous nested locale operation or leaves its typed continuation pending.
-    fn dispatch_intl_number_format_nested(
-        &mut self,
-        continuation: NativeContinuation,
-        operation: impl FnOnce(&mut Self) -> Result<(), ExecutionError>,
-    ) -> Result<(), ExecutionError> {
-        self.fiber
-            .completions
-            .push_native(continuation)
-            .map_err(Self::completion_stack_error)?;
-        let frame_depth = self.fiber.frames.len();
-        if let Err(error) = operation(self) {
-            self.pop_native_continuation()?;
-            return Err(error);
-        }
-        if self.fiber.frames.len() != frame_depth {
-            return Ok(());
-        }
-        let continuation = self.pop_native_continuation()?;
-        let value = self.read(
-            continuation.site().caller_base,
-            continuation.site().destination,
-        )?;
-        let NativeContinuationKind::IntlNumberFormat(stage) = continuation.kind() else {
-            return Err(ExecutionError::MissingNativeContinuation);
-        };
-        self.resume_intl_number_format(continuation, stage, value)
-    }
-
-    fn allocate_intl_number_format_state(
+    /// Allocates the fixed receiver state before a formatting argument can invoke JavaScript.
+    fn allocate_intl_number_format_value_state(
         &mut self,
         state: NativeCallState,
     ) -> Result<GcRef<NativeCallState>, ExecutionError> {
-        let mut roots = IntlNumberFormatStateRoots {
+        let mut roots = IntlNumberFormatValueRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
                 suspended_fibers: &mut self.suspended_fibers,
@@ -344,16 +188,142 @@ impl Isolate {
             .map_err(ExecutionError::HeapAllocation)
     }
 
-    fn intl_locale_strings(&mut self, value: Value) -> Result<Box<[Box<str>]>, ExecutionError> {
-        let values = self.copy_packed_intl_array(value)?;
-        let mut locales = Vec::new();
-        locales
-            .try_reserve_exact(values.len())
-            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
-        for locale in values {
-            locales.push(self.intl_ascii_string(locale)?);
+    /// Publishes a fresh resolved-options object in ECMA-402 property order.
+    pub(crate) fn call_intl_number_format_resolved_options(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let number_format = self.intl_number_format_reference(site.this_value)?;
+        let resolved = self.intl_number_format_resolved(number_format)?;
+        let result = self.create_ordinary_object()?;
+        self.write(site.caller_base, site.destination, result)?;
+        self.set_intl_number_format_string(result, b"locale", resolved.locale.as_bytes())?;
+        self.set_intl_number_format_string(
+            result,
+            b"numberingSystem",
+            resolved.numbering_system.as_bytes(),
+        )?;
+        let style = match resolved.options.style {
+            IntlNumberFormatStyle::Decimal => b"decimal".as_slice(),
+            IntlNumberFormatStyle::Percent => b"percent".as_slice(),
+            IntlNumberFormatStyle::Currency => b"currency".as_slice(),
+            IntlNumberFormatStyle::Unit => b"unit".as_slice(),
+        };
+        self.set_intl_number_format_string(result, b"style", style)?;
+        if let Some(currency) = resolved.options.currency.as_deref() {
+            self.set_intl_number_format_string(result, b"currency", currency.as_bytes())?;
+            let display = match resolved.options.currency_display {
+                IntlNumberFormatCurrencyDisplay::Code => b"code".as_slice(),
+                IntlNumberFormatCurrencyDisplay::Symbol => b"symbol".as_slice(),
+                IntlNumberFormatCurrencyDisplay::NarrowSymbol => b"narrowSymbol".as_slice(),
+                IntlNumberFormatCurrencyDisplay::Name => b"name".as_slice(),
+            };
+            self.set_intl_number_format_string(result, b"currencyDisplay", display)?;
+            let sign = match resolved.options.currency_sign {
+                IntlNumberFormatCurrencySign::Standard => b"standard".as_slice(),
+                IntlNumberFormatCurrencySign::Accounting => b"accounting".as_slice(),
+            };
+            self.set_intl_number_format_string(result, b"currencySign", sign)?;
         }
-        Ok(locales.into_boxed_slice())
+        if let Some(unit) = resolved.options.unit.as_deref() {
+            self.set_intl_number_format_string(result, b"unit", unit.as_bytes())?;
+            let display = match resolved.options.unit_display {
+                IntlNumberFormatUnitDisplay::Short => b"short".as_slice(),
+                IntlNumberFormatUnitDisplay::Narrow => b"narrow".as_slice(),
+                IntlNumberFormatUnitDisplay::Long => b"long".as_slice(),
+            };
+            self.set_intl_number_format_string(result, b"unitDisplay", display)?;
+        }
+        self.set_intl_number_format_number(
+            result,
+            b"minimumIntegerDigits",
+            u32::from(resolved.options.minimum_integer_digits),
+        )?;
+        if let Some(value) = resolved.options.minimum_fraction_digits {
+            self.set_intl_number_format_number(result, b"minimumFractionDigits", u32::from(value))?;
+        }
+        if let Some(value) = resolved.options.maximum_fraction_digits {
+            self.set_intl_number_format_number(result, b"maximumFractionDigits", u32::from(value))?;
+        }
+        if let Some(value) = resolved.options.minimum_significant_digits {
+            self.set_intl_number_format_number(
+                result,
+                b"minimumSignificantDigits",
+                u32::from(value),
+            )?;
+        }
+        if let Some(value) = resolved.options.maximum_significant_digits {
+            self.set_intl_number_format_number(
+                result,
+                b"maximumSignificantDigits",
+                u32::from(value),
+            )?;
+        }
+        match resolved.options.use_grouping {
+            IntlNumberFormatUseGrouping::Never => {
+                let key = self.intern_intrinsic_name(b"useGrouping")?;
+                self.set_own_data_property(result, key, boolean_value(false))?;
+            }
+            IntlNumberFormatUseGrouping::Min2 => {
+                self.set_intl_number_format_string(result, b"useGrouping", b"min2")?;
+            }
+            IntlNumberFormatUseGrouping::Auto => {
+                self.set_intl_number_format_string(result, b"useGrouping", b"auto")?;
+            }
+            IntlNumberFormatUseGrouping::Always => {
+                self.set_intl_number_format_string(result, b"useGrouping", b"always")?;
+            }
+        }
+        let notation = match resolved.options.notation {
+            IntlNumberFormatNotation::Standard => b"standard".as_slice(),
+            IntlNumberFormatNotation::Scientific => b"scientific".as_slice(),
+            IntlNumberFormatNotation::Engineering => b"engineering".as_slice(),
+            IntlNumberFormatNotation::Compact => b"compact".as_slice(),
+        };
+        self.set_intl_number_format_string(result, b"notation", notation)?;
+        if resolved.options.notation == IntlNumberFormatNotation::Compact {
+            let compact = match resolved.options.compact_display {
+                IntlNumberFormatCompactDisplay::Short => b"short".as_slice(),
+                IntlNumberFormatCompactDisplay::Long => b"long".as_slice(),
+            };
+            self.set_intl_number_format_string(result, b"compactDisplay", compact)?;
+        }
+        let sign_display = match resolved.options.sign_display {
+            IntlNumberFormatSignDisplay::Auto => b"auto".as_slice(),
+            IntlNumberFormatSignDisplay::Never => b"never".as_slice(),
+            IntlNumberFormatSignDisplay::Always => b"always".as_slice(),
+            IntlNumberFormatSignDisplay::ExceptZero => b"exceptZero".as_slice(),
+            IntlNumberFormatSignDisplay::Negative => b"negative".as_slice(),
+        };
+        self.set_intl_number_format_string(result, b"signDisplay", sign_display)?;
+        self.set_intl_number_format_number(
+            result,
+            b"roundingIncrement",
+            u32::from(resolved.options.rounding_increment),
+        )?;
+        let rounding_mode = match resolved.options.rounding_mode {
+            IntlNumberFormatRoundingMode::Ceil => b"ceil".as_slice(),
+            IntlNumberFormatRoundingMode::Floor => b"floor".as_slice(),
+            IntlNumberFormatRoundingMode::Expand => b"expand".as_slice(),
+            IntlNumberFormatRoundingMode::Trunc => b"trunc".as_slice(),
+            IntlNumberFormatRoundingMode::HalfCeil => b"halfCeil".as_slice(),
+            IntlNumberFormatRoundingMode::HalfFloor => b"halfFloor".as_slice(),
+            IntlNumberFormatRoundingMode::HalfExpand => b"halfExpand".as_slice(),
+            IntlNumberFormatRoundingMode::HalfTrunc => b"halfTrunc".as_slice(),
+            IntlNumberFormatRoundingMode::HalfEven => b"halfEven".as_slice(),
+        };
+        self.set_intl_number_format_string(result, b"roundingMode", rounding_mode)?;
+        let priority = match resolved.options.rounding_priority {
+            IntlNumberFormatRoundingPriority::Auto => b"auto".as_slice(),
+            IntlNumberFormatRoundingPriority::MorePrecision => b"morePrecision".as_slice(),
+            IntlNumberFormatRoundingPriority::LessPrecision => b"lessPrecision".as_slice(),
+        };
+        self.set_intl_number_format_string(result, b"roundingPriority", priority)?;
+        let trailing = match resolved.options.trailing_zero_display {
+            IntlNumberFormatTrailingZeroDisplay::Auto => b"auto".as_slice(),
+            IntlNumberFormatTrailingZeroDisplay::StripIfInteger => b"stripIfInteger".as_slice(),
+        };
+        self.set_intl_number_format_string(result, b"trailingZeroDisplay", trailing)
     }
 
     /// Converts supported primitive Number/BigInt inputs without retaining managed borrows.
@@ -372,6 +342,9 @@ impl Isolate {
             .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
         if number.is_nan() {
             return Ok(IntlMathematicalValue::NaN);
+        }
+        if number == 0.0 && number.is_sign_negative() {
+            return Ok(IntlMathematicalValue::NegativeZero);
         }
         if number == f64::INFINITY {
             return Ok(IntlMathematicalValue::PositiveInfinity);

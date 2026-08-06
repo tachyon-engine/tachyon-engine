@@ -623,6 +623,9 @@ impl Isolate {
             pending_intl_collator: registry
                 .try_register("PendingIntlCollator")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_intl_number_format: registry
+                .try_register("PendingIntlNumberFormat")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             intl_number_format_payload: registry
                 .try_register("IntlNumberFormatPayload")
                 .map_err(IsolateCreationError::TypeRegistration)?,

@@ -17,9 +17,8 @@ use icu_provider::{
 };
 use tachyon_vm::{
     HostProviderError, IntlLocaleMatcher, IntlMathematicalValue, IntlNumberFormatBackend,
-    IntlNumberFormatCreation, IntlNumberFormatNotation, IntlNumberFormatRequest,
-    IntlNumberFormatResolved, IntlNumberFormatSignDisplay, IntlNumberFormatStyle,
-    IntlNumberFormatUseGrouping,
+    IntlNumberFormatCreation, IntlNumberFormatRequest, IntlNumberFormatResolved,
+    IntlNumberFormatSignDisplay, IntlNumberFormatUseGrouping,
 };
 
 use crate::supported_values::NUMBERING_SYSTEMS;
@@ -48,8 +47,15 @@ impl IntlNumberFormatBackend for Icu4xNumberFormatBackend {
     fn format(&self, value: &IntlMathematicalValue) -> Result<Box<[u16]>, HostProviderError> {
         let formatted = match value {
             IntlMathematicalValue::Finite(value) => {
-                let mut decimal = Decimal::from_str(value).map_err(|_| DATA_FAILURE)?;
+                let mut decimal = parse_mathematical_decimal(value)?;
                 decimal.round(-i16::from(self.maximum_fraction_digits));
+                decimal.pad_end(-i16::from(self.minimum_fraction_digits));
+                decimal.pad_start(i16::from(self.minimum_integer_digits));
+                decimal.apply_sign_display(sign_display(self.sign_display));
+                self.localize_decimal(&decimal.to_string())?
+            }
+            IntlMathematicalValue::NegativeZero => {
+                let mut decimal = Decimal::from_str("-0").map_err(|_| DATA_FAILURE)?;
                 decimal.pad_end(-i16::from(self.minimum_fraction_digits));
                 decimal.pad_start(i16::from(self.minimum_integer_digits));
                 decimal.apply_sign_display(sign_display(self.sign_display));
@@ -191,7 +197,66 @@ struct LoadedDecimalData {
     grouping_sizes: GroupingSizes,
 }
 
-/// Creates the first standards-aligned decimal substrate without pretending unsupported styles work.
+/// Expands the bounded exponent syntax emitted by ECMAScript Number::toString without f64 loss.
+fn parse_mathematical_decimal(value: &str) -> Result<Decimal, HostProviderError> {
+    if let Ok(decimal) = Decimal::from_str(value) {
+        return Ok(decimal);
+    }
+    let exponent_at = value
+        .bytes()
+        .position(|byte| matches!(byte, b'e' | b'E'))
+        .ok_or(DATA_FAILURE)?;
+    let (mantissa, exponent) = value.split_at(exponent_at);
+    let exponent = exponent
+        .get(1..)
+        .ok_or(DATA_FAILURE)?
+        .parse::<i32>()
+        .map_err(|_| DATA_FAILURE)?;
+    let (negative, mantissa) = mantissa
+        .strip_prefix('-')
+        .map(|value| (true, value))
+        .unwrap_or((false, mantissa));
+    let decimal_at = mantissa.find('.').unwrap_or(mantissa.len());
+    let mut digits = String::new();
+    digits
+        .try_reserve_exact(mantissa.len())
+        .map_err(|_| DATA_FAILURE)?;
+    digits.extend(mantissa.chars().filter(|character| *character != '.'));
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(DATA_FAILURE);
+    }
+    let decimal_at = i32::try_from(decimal_at)
+        .map_err(|_| DATA_FAILURE)?
+        .checked_add(exponent)
+        .ok_or(DATA_FAILURE)?;
+    let mut expanded = String::new();
+    expanded
+        .try_reserve_exact(digits.len().saturating_add(340))
+        .map_err(|_| DATA_FAILURE)?;
+    if negative {
+        expanded.push('-');
+    }
+    if decimal_at <= 0 {
+        expanded.push_str("0.");
+        for _ in 0..decimal_at.unsigned_abs() {
+            expanded.push('0');
+        }
+        expanded.push_str(&digits);
+    } else if usize::try_from(decimal_at).map_err(|_| DATA_FAILURE)? >= digits.len() {
+        expanded.push_str(&digits);
+        for _ in digits.len()..usize::try_from(decimal_at).map_err(|_| DATA_FAILURE)? {
+            expanded.push('0');
+        }
+    } else {
+        let decimal_at = usize::try_from(decimal_at).map_err(|_| DATA_FAILURE)?;
+        expanded.push_str(digits.get(..decimal_at).ok_or(DATA_FAILURE)?);
+        expanded.push('.');
+        expanded.push_str(digits.get(decimal_at..).ok_or(DATA_FAILURE)?);
+    }
+    Decimal::from_str(&expanded).map_err(|_| DATA_FAILURE)
+}
+
+/// Creates locale data for every validated option record while formatting support is layered in.
 pub(super) fn create(
     default_locale: &str,
     request: IntlNumberFormatRequest,
@@ -202,15 +267,6 @@ pub(super) fn create(
         .find_map(|locale| match_locale(locale, request.locale_matcher))
         .or_else(|| match_locale(default_locale, request.locale_matcher))
         .ok_or(DATA_FAILURE)?;
-    if request.options.style != IntlNumberFormatStyle::Decimal
-        || request.options.notation != IntlNumberFormatNotation::Standard
-        || request.options.rounding_increment != 1
-        || request.options.minimum_significant_digits.is_some()
-        || request.options.maximum_significant_digits.is_some()
-    {
-        return Err(HostProviderError::Unavailable);
-    }
-
     let locale_numbering_system = unicode_keyword(&matched.requested, "nu");
     let option_numbering_system = request
         .numbering_system
@@ -391,7 +447,7 @@ const fn sign_display(value: IntlNumberFormatSignDisplay) -> SignDisplay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tachyon_vm::IntlNumberFormatOptions;
+    use tachyon_vm::{IntlNumberFormatOptions, IntlNumberFormatStyle};
 
     fn request(locale: &str) -> IntlNumberFormatRequest {
         IntlNumberFormatRequest {
@@ -431,13 +487,16 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_style_is_explicit_instead_of_silently_formatting_as_decimal() {
+    fn validated_non_decimal_slots_survive_provider_creation() {
         let mut currency = request("en");
         currency.options.style = IntlNumberFormatStyle::Currency;
-        assert!(matches!(
-            create("en", currency),
-            Err(HostProviderError::Unavailable)
-        ));
+        currency.options.currency = Some("USD".into());
+        let currency = create("en", currency).unwrap();
+        assert_eq!(
+            currency.resolved.options.style,
+            IntlNumberFormatStyle::Currency
+        );
+        assert_eq!(currency.resolved.options.currency.as_deref(), Some("USD"));
     }
 
     #[test]

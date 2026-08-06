@@ -8,6 +8,7 @@ impl IntlNumberFormatBackend for TestNumberFormatBackend {
     fn format(&self, value: &IntlMathematicalValue) -> Result<Box<[u16]>, HostProviderError> {
         let value = match value {
             IntlMathematicalValue::Finite(value) => value.as_ref(),
+            IntlMathematicalValue::NegativeZero => "-0",
             IntlMathematicalValue::PositiveInfinity => "Infinity",
             IntlMathematicalValue::NegativeInfinity => "-Infinity",
             IntlMathematicalValue::NaN => "NaN",
