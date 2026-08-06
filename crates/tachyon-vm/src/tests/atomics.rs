@@ -187,6 +187,40 @@ fn atomics_wait_conversion_survives_forced_major_collection() {
     assert_atomics_wait::<8>(true);
 }
 
+#[test]
+fn atomics_wait_async_invalid_view_is_catchable_type_error() {
+    let module = compile_source(
+        r#"
+var view = new Uint8Array(new SharedArrayBuffer(8));
+function classify(callback) {
+  try { callback(); return "none"; }
+  catch (error) {
+    return error instanceof TypeError ? "type" :
+      error instanceof SyntaxError ? "syntax" : "other";
+  }
+}
+classify(function() {
+  Atomics.waitAsync(view, { valueOf() { throw 17; } }, 0, 0);
+}) === "type";
+"#,
+        9_302,
+    );
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 100_000,
+                quantum: 100_000,
+            },
+        )
+        .expect("invalid waitAsync view executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "{outcome:?}"
+    );
+}
+
 /// Executes the shared fixture under one dispatch and collection policy.
 fn assert_atomics<const N: usize>(forced_major: bool) {
     let module = compile_atomics_source(9_200 + N as u32);
