@@ -191,7 +191,7 @@ fn atomics_wait_conversion_survives_forced_major_collection() {
 fn atomics_wait_async_invalid_view_is_catchable_type_error() {
     let module = compile_source(
         r#"
-var view = new Uint8Array(new SharedArrayBuffer(8));
+var views = [Float64Array, Float32Array, Int16Array, Int8Array, Uint32Array, Uint16Array, Uint8Array, Uint8ClampedArray];
 function classify(callback) {
   try { callback(); return "none"; }
   catch (error) {
@@ -199,9 +199,14 @@ function classify(callback) {
       error instanceof SyntaxError ? "syntax" : "other";
   }
 }
-classify(function() {
-  Atomics.waitAsync(view, { valueOf() { throw 17; } }, 0, 0);
-}) === "type";
+var all = true;
+for (var Constructor of views) {
+  var view = new Constructor(new SharedArrayBuffer(8));
+  all = all && classify(function() {
+    Atomics.waitAsync(view, { valueOf() { throw 17; } }, 0, 0);
+  }) === "type";
+}
+all;
 "#,
         9_302,
     );
