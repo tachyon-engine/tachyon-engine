@@ -49,6 +49,28 @@ impl Isolate {
         Ok(numeric_negate(self.convert_to_number(value)?))
     }
 
+    /// Applies update-expression ToNumeric and adds a one in the selected numeric domain.
+    pub(crate) fn numeric_primitive_update(
+        &mut self,
+        value: Value,
+        decrement: bool,
+    ) -> Result<Value, ExecutionError> {
+        if self.is_bigint_value(value) {
+            let one = Value::from_small_bigint(1).expect("one fits BigInt");
+            return self.bigint_binary_operation(
+                if decrement { Opcode::Sub } else { Opcode::Add },
+                value,
+                one,
+            );
+        }
+        let number = self.convert_to_number(value)?;
+        Ok(numeric_binary(
+            if decrement { Opcode::Sub } else { Opcode::Add },
+            number,
+            Value::from_i32(1),
+        ))
+    }
+
     /// Implements the shared thisNumberValue brand check for Number prototype methods.
     pub(crate) fn this_number_value(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
         if numeric_value(receiver).is_some() {

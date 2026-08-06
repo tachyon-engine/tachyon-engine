@@ -328,6 +328,7 @@ pub(crate) enum ConversionConsumer {
     StringRawLiteral,
     StringRawSubstitution,
     Negate,
+    Update(bool),
     BitwiseNot,
     BinaryLeft(Opcode),
     BinaryRight(Opcode),
@@ -480,6 +481,7 @@ impl ConversionConsumer {
             | Self::StringRawLiteral
             | Self::StringRawSubstitution
             | Self::Negate
+            | Self::Update(_)
             | Self::BitwiseNot
             | Self::BinaryLeft(_)
             | Self::BinaryRight(_)
@@ -714,6 +716,7 @@ impl ConversionConsumer {
                 | Self::StringRawLiteral
                 | Self::StringRawSubstitution
                 | Self::Negate
+                | Self::Update(_)
                 | Self::BitwiseNot
                 | Self::BinaryLeft(_)
                 | Self::BinaryRight(_)

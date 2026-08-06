@@ -323,9 +323,11 @@ pub enum Opcode {
     SetObjectLiteralPrototype = 138,
     /// Applies ECMAScript ToString with the string preferred type.
     ToString = 139,
+    /// Applies prefix/postfix update arithmetic after ToNumeric.
+    Update = 140,
 }
 
-pub(super) const OPCODE_COUNT: usize = 140;
+pub(super) const OPCODE_COUNT: usize = 141;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -467,10 +469,11 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     2, // LoadTemplateObject
     2, // SetObjectLiteralPrototype
     2, // ToString
+    3, // Update
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::ToString as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::Update as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -656,6 +659,7 @@ impl Opcode {
             73 => Some(Self::LoadTemplateObject),
             74 => Some(Self::SetObjectLiteralPrototype),
             75 => Some(Self::ToString),
+            76 => Some(Self::Update),
             _ => None,
         }
     }

@@ -640,7 +640,7 @@ fn compiler_compacts_zero_argument_call_loop_hot_path() {
         .unwrap();
     let disassembly = tachyon_bytecode::disassemble(main).unwrap();
     assert!(disassembly.contains("Call r4, callee=r3, argc=0"));
-    assert!(disassembly.contains("Add r0, r0,"));
+    assert!(disassembly.contains("Update r0, r0, increment"));
     assert!(!disassembly.contains("Move"));
 }
 

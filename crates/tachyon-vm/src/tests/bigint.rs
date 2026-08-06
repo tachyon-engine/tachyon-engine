@@ -62,7 +62,8 @@ if (!(BigInt.name === "BigInt" && BigInt.length === 1 &&
 if (!(BigInt(0n) === 0n && BigInt(-1n) === -1n &&
       BigInt(9007199254740994) === 9007199254740994n &&
       BigInt(-9007199254740994) === -9007199254740994n &&
-      BigInt(false) === 0n && BigInt(true) === 1n)) failure = 2;
+      BigInt(false) === 0n && BigInt(true) === 1n &&
+      Number(87n) === 87)) failure = 2;
 if (!(BigInt("") === 0n && BigInt("\u00a0\u2028123\u3000") === 123n &&
       BigInt("+42") === 42n && BigInt("-42") === -42n &&
       BigInt("0b1111") === 15n && BigInt("0O70") === 56n &&
@@ -95,6 +96,9 @@ var trace = "";
 var left = { [Symbol.toPrimitive]() { trace += "l"; return huge; } };
 var right = { valueOf() { trace += "r"; return 3n; } };
 var resumed = left * right;
+var updated = 1n;
+var postfix = updated++;
+var prefix = ++updated;
 var failure = 0;
 if (!(huge + mask === 36893488147419103231n &&
       huge - mask === 1n && mask - huge === -1n &&
@@ -118,6 +122,8 @@ if (!(throws(TypeError, function() { return 1n + 1; }) &&
       throws(RangeError, function() { return 1n / 0n; }) &&
       throws(RangeError, function() { return 1n % 0n; }) &&
       throws(RangeError, function() { return 2n ** -1n; }))) failure = 7;
+if (!(postfix === 1n && prefix === 3n && updated === 3n &&
+      updated-- === 3n && --updated === 1n)) failure = 8;
 failure;
 "#;
 

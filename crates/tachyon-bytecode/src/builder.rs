@@ -298,6 +298,7 @@ impl BytecodeBuilder {
             | Opcode::CreateExclusionList
             | Opcode::ExcludePropertyKey
             | Opcode::CollectRestArguments => &[0, 1],
+            Opcode::Update => &[0, 1],
             Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => &[0],
             Opcode::Add
             | Opcode::Sub

@@ -26,7 +26,7 @@ impl Isolate {
     /// Starts set with an allocation-free typed-source and primitive-offset fast path.
     pub(crate) fn begin_typed_array_set(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         let target = site.this_value;
-        let _ = self.validated_typed_array_snapshot(target)?;
+        let _ = self.typed_array_snapshot(target)?;
         let undefined = Value::from_immediate(Immediate::Undefined);
         let source = self.call_argument(site, 0)?.unwrap_or(undefined);
         let offset = self.call_argument(site, 1)?.unwrap_or(undefined);

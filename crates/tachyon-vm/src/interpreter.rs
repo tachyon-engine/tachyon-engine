@@ -972,6 +972,23 @@ impl Isolate {
                     self.write(base, operands[0], value)?;
                 }
             }
+            Opcode::Update => {
+                let input = self.read(base, operands[1])?;
+                let decrement = operands[2] != 0;
+                if self.is_object_value(input) {
+                    self.dispatch_object_primitive_conversion(
+                        ConversionConsumer::Update(decrement),
+                        base,
+                        operands[0],
+                        Value::from_immediate(Immediate::Undefined),
+                        input,
+                        instruction_offset,
+                    )?;
+                } else {
+                    let value = self.numeric_primitive_update(input, decrement)?;
+                    self.write(base, operands[0], value)?;
+                }
+            }
             Opcode::ToNumber => {
                 let input = self.read(base, operands[1])?;
                 if self.is_object_value(input) {
@@ -9987,6 +10004,31 @@ pub(crate) unsafe fn execute_verified_hot_instruction(
                     Opcode::BitwiseNot => numeric_bitwise_not(input),
                     Opcode::ToNumber => input,
                     _ => unreachable!("numeric unary hot dispatch is exhaustive"),
+                };
+                registers.write(operands[0], value);
+                HotControl::Continue
+            }
+            Opcode::Update => {
+                let input = registers.read(operands[1]);
+                let decrement = operands[2] != 0;
+                let value = if let Some(bigint) = input.as_small_bigint() {
+                    let updated = if decrement {
+                        bigint.checked_sub(1)
+                    } else {
+                        bigint.checked_add(1)
+                    };
+                    let Some(value) = updated.and_then(Value::from_small_bigint) else {
+                        return HotControl::Slow;
+                    };
+                    value
+                } else if numeric_value(input).is_some() {
+                    numeric_binary(
+                        if decrement { Opcode::Sub } else { Opcode::Add },
+                        input,
+                        Value::from_i32(1),
+                    )
+                } else {
+                    return HotControl::Slow;
                 };
                 registers.write(operands[0], value);
                 HotControl::Continue

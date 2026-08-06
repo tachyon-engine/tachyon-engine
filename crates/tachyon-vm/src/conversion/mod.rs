@@ -66,7 +66,11 @@ impl Isolate {
             ),
             NativeFunction::NumberConstructor => {
                 let argument = argument.unwrap_or(Value::from_i32(0));
-                self.convert_to_number(argument)
+                if self.is_bigint_value(argument) {
+                    self.bigint_to_number_value(argument)
+                } else {
+                    self.convert_to_number(argument)
+                }
             }
             NativeFunction::BigIntConstructor => {
                 let argument = argument.unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -1595,6 +1599,9 @@ impl Isolate {
                     unreachable!("String.raw conversion resumes inside its state machine")
                 }
                 ConversionConsumer::Negate => self.numeric_primitive_negate(argument)?,
+                ConversionConsumer::Update(decrement) => {
+                    self.numeric_primitive_update(argument, decrement)?
+                }
                 ConversionConsumer::BitwiseNot => self.numeric_primitive_bitwise_not(argument)?,
                 ConversionConsumer::BinaryLeft(_) | ConversionConsumer::BinaryRight(_) => {
                     unreachable!("binary consumers finish inside the conversion state machine")

@@ -116,6 +116,17 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::ForInNext
         | Opcode::ExcludePropertyKey
         | Opcode::CollectRestArguments => write!(output, " r{}, r{}", operands[0], operands[1])?,
+        Opcode::Update => write!(
+            output,
+            " r{}, r{}, {}",
+            operands[0],
+            operands[1],
+            if operands[2] == 0 {
+                "increment"
+            } else {
+                "decrement"
+            }
+        )?,
         Opcode::CreateExclusionList => {
             write!(output, " r{}, capacity={}", operands[0], operands[1])?
         }

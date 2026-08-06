@@ -951,6 +951,16 @@ fn verify_instruction(
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
+        Opcode::Update => {
+            check_register(operands[0])?;
+            check_register(operands[1])?;
+            if operands[2] > 1 {
+                return Err(VerifyError::InvalidBooleanOperand {
+                    offset,
+                    operand: operands[2],
+                });
+            }
+        }
         Opcode::CreateExclusionList => check_register(operands[0])?,
         Opcode::SetFunctionName => check_register(operands[0])?,
         Opcode::Add

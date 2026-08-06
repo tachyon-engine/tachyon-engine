@@ -117,6 +117,7 @@ fn operand_count_table_covers_every_opcode_once() {
             3,
             &[
                 Opcode::Add,
+                Opcode::Update,
                 Opcode::Sub,
                 Opcode::Mul,
                 Opcode::Div,

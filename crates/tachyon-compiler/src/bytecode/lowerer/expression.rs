@@ -2213,9 +2213,9 @@ impl Lowerer<'_> {
         target: &HirAssignmentTarget,
         span: SourceSpan,
     ) -> Result<RegisterId, CompileError> {
-        let opcode = match operator {
-            HirUpdateOperator::Increment => HirBinaryOperator::Add,
-            HirUpdateOperator::Decrement => HirBinaryOperator::Subtract,
+        let update_kind = match operator {
+            HirUpdateOperator::Increment => 0,
+            HirUpdateOperator::Decrement => 1,
         };
         match target {
             HirAssignmentTarget::Identifier(target) => {
@@ -2224,8 +2224,12 @@ impl Lowerer<'_> {
                         return Err(self.unsupported(span, "update of immutable local"));
                     }
                     let old = self.snapshot_local(&binding, span)?;
-                    let one = self.load_immediate(1, span)?;
-                    let updated = self.emit_binary(opcode, old, one, span)?;
+                    let updated = self.register()?;
+                    self.emit(
+                        Opcode::Update,
+                        &[updated.index(), old.index(), update_kind],
+                        span,
+                    )?;
                     self.write_local(&binding, updated, span)?;
                     return Ok(if prefix { updated } else { old });
                 }
@@ -2234,12 +2238,16 @@ impl Lowerer<'_> {
                         return Err(self.unsupported(span, "update of immutable capture"));
                     }
                     let old = self.snapshot_local(&binding, span)?;
-                    let one = self.load_immediate(1, span)?;
-                    let updated = self.emit_binary(opcode, old, one, span)?;
+                    let updated = self.register()?;
+                    self.emit(
+                        Opcode::Update,
+                        &[updated.index(), old.index(), update_kind],
+                        span,
+                    )?;
                     self.write_local(&binding, updated, span)?;
                     return Ok(if prefix { updated } else { old });
                 }
-                self.scope_update(opcode, prefix, target, span)
+                self.scope_update(operator, prefix, target, span)
             }
             HirAssignmentTarget::StaticMember { object, property } => {
                 let receiver = self.expression(object)?;
@@ -2257,8 +2265,12 @@ impl Lowerer<'_> {
                     self.emit(Opcode::Move, &[snapshot.index(), old.index()], span)?;
                     Some(snapshot)
                 };
-                let one = self.load_immediate(1, span)?;
-                let updated = self.emit_binary(opcode, old, one, span)?;
+                let updated = self.register()?;
+                self.emit(
+                    Opcode::Update,
+                    &[updated.index(), old.index(), update_kind],
+                    span,
+                )?;
                 self.emit(
                     Opcode::SetById,
                     &[receiver.index(), updated.index(), property],
@@ -2283,8 +2295,12 @@ impl Lowerer<'_> {
                     self.emit(Opcode::Move, &[snapshot.index(), old.index()], span)?;
                     Some(snapshot)
                 };
-                let one = self.load_immediate(1, span)?;
-                let updated = self.emit_binary(opcode, old, one, span)?;
+                let updated = self.register()?;
+                self.emit(
+                    Opcode::Update,
+                    &[updated.index(), old.index(), update_kind],
+                    span,
+                )?;
                 self.emit(
                     Opcode::SetByValue,
                     &[receiver.index(), updated.index(), property.index()],
@@ -2308,8 +2324,12 @@ impl Lowerer<'_> {
                     self.emit(Opcode::Move, &[snapshot.index(), old.index()], span)?;
                     Some(snapshot)
                 };
-                let one = self.load_immediate(1, span)?;
-                let updated = self.emit_binary(opcode, old, one, span)?;
+                let updated = self.register()?;
+                self.emit(
+                    Opcode::Update,
+                    &[updated.index(), old.index(), update_kind],
+                    span,
+                )?;
                 self.emit(
                     Opcode::SetPrivate,
                     &[receiver.index(), updated.index(), key.index()],
@@ -2323,7 +2343,7 @@ impl Lowerer<'_> {
     /// Loads, snapshots, updates, and stores one dynamically resolved identifier exactly once.
     pub(in crate::bytecode) fn scope_update(
         &mut self,
-        opcode: HirBinaryOperator,
+        operator: HirUpdateOperator,
         prefix: bool,
         target: &HirIdentifierReference,
         span: SourceSpan,
@@ -2339,8 +2359,16 @@ impl Lowerer<'_> {
             self.emit(Opcode::Move, &[snapshot.index(), old.index()], span)?;
             Some(snapshot)
         };
-        let one = self.load_immediate(1, span)?;
-        let updated = self.emit_binary(opcode, old, one, span)?;
+        let updated = self.register()?;
+        let update_kind = match operator {
+            HirUpdateOperator::Increment => 0,
+            HirUpdateOperator::Decrement => 1,
+        };
+        self.emit(
+            Opcode::Update,
+            &[updated.index(), old.index(), update_kind],
+            span,
+        )?;
         self.emit(
             Opcode::StoreResolvedScope,
             &[updated.index(), scope_name],
@@ -3303,14 +3331,13 @@ impl Lowerer<'_> {
             if !binding.mutable {
                 return Err(self.unsupported(expression.span, "update of immutable local"));
             }
-            let one = self.load_immediate(1, expression.span)?;
-            let opcode = match operator {
-                HirUpdateOperator::Increment => Opcode::Add,
-                HirUpdateOperator::Decrement => Opcode::Sub,
+            let update_kind = match operator {
+                HirUpdateOperator::Increment => 0,
+                HirUpdateOperator::Decrement => 1,
             };
             self.emit(
-                opcode,
-                &[register.index(), register.index(), one.index()],
+                Opcode::Update,
+                &[register.index(), register.index(), update_kind],
                 expression.span,
             )?;
             return Ok(());
