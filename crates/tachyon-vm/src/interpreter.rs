@@ -82,6 +82,37 @@ impl Isolate {
         self.execute_loaded(code, budget)
     }
 
+    /// Executes an embedding entry script without synchronously draining its Promise checkpoint.
+    /// The caller must subsequently drive queued jobs through [`Isolate::poll_jobs_once`].
+    pub fn execute_without_promise_checkpoint(
+        &mut self,
+        module: &CompiledModule,
+        budget: ExecutionBudget,
+    ) -> Result<RunOutcome, ExecutionError> {
+        if self.driver_is_busy() {
+            return Err(ExecutionError::DriverBusy);
+        }
+        let code = self.load_module(module)?;
+        let previous = self.suppress_promise_checkpoint;
+        self.suppress_promise_checkpoint = true;
+        let result = self.execute_loaded(code, budget);
+        self.suppress_promise_checkpoint = previous;
+        result
+    }
+
+    /// Finishes a top-level entry frame while honoring embedding checkpoint ownership.
+    fn finish_entry_execution(
+        &mut self,
+        value: Value,
+        instruction_offset: WordOffset,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        if self.suppress_promise_checkpoint {
+            Ok(Some(RunOutcome::Completed(value)))
+        } else {
+            self.promise_checkpoint(value, instruction_offset)
+        }
+    }
+
     /// Resolves immutable scope names once and publishes one bounded isolate-local code entry.
     pub fn load_module(&mut self, module: &CompiledModule) -> Result<CodeId, ExecutionError> {
         if let Some(index) = self
@@ -1984,7 +2015,7 @@ impl Isolate {
                         if self.current_entry_is_module()? {
                             return Ok(Some(RunOutcome::Completed(value)));
                         }
-                        return self.promise_checkpoint(value, instruction_offset);
+                        return self.finish_entry_execution(value, instruction_offset);
                     }
                     return self.finish_return(value);
                 }
@@ -2010,7 +2041,7 @@ impl Isolate {
                         if self.current_entry_is_module()? {
                             return Ok(Some(RunOutcome::Completed(value)));
                         }
-                        return self.promise_checkpoint(value, instruction_offset);
+                        return self.finish_entry_execution(value, instruction_offset);
                     }
                     return self.finish_return(value);
                 }
@@ -9157,7 +9188,7 @@ impl Isolate {
                         if self.current_entry_is_module()? {
                             return Ok(Some(RunOutcome::Completed(value)));
                         }
-                        return self.promise_checkpoint(value, instruction_offset);
+                        return self.finish_entry_execution(value, instruction_offset);
                     }
                     return self.finish_return(value);
                 }

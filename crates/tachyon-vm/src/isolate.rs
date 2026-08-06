@@ -69,6 +69,7 @@ impl Trace for WeakCollectionAllocationRoots<'_> {
 pub struct Isolate {
     pub(crate) fiber: Fiber,
     pub(crate) driver_active_work: Option<DriverActiveWork>,
+    pub(crate) suppress_promise_checkpoint: bool,
     pub(crate) finalization_jobs: finalization::FinalizationJobs,
     pub(crate) promise_jobs: PromiseJobQueue,
     pub(crate) pending_atomics_waits: Vec<crate::atomics_async::PendingAtomicsWait>,
@@ -751,6 +752,7 @@ impl Isolate {
         let mut isolate = Self {
             fiber: Fiber::default(),
             driver_active_work: None,
+            suppress_promise_checkpoint: false,
             finalization_jobs: finalization::FinalizationJobs::new(),
             promise_jobs: PromiseJobQueue::new(),
             pending_atomics_waits: Vec::with_capacity(

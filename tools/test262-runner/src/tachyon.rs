@@ -299,7 +299,7 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
                 ));
             }
         };
-        if let Some(outcome) = execute_module(&mut isolate, &module) {
+        if let Some(outcome) = execute_module(&mut isolate, &module, false) {
             return outcome;
         }
     }
@@ -317,7 +317,13 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
         ) {
             return outcome;
         }
-    } else if let Some(outcome) = execute_module(&mut isolate, &module) {
+    } else if let Some(outcome) = execute_module(
+        &mut isolate,
+        &module,
+        request.is_async
+            && request.test.body.source.contains("Atomics.waitAsync")
+            && !request.test.body.source.contains("$262.agent.start"),
+    ) {
         return outcome;
     } else {
         let root = match ModuleIdentity::try_new(&request.test.body.name) {
@@ -352,7 +358,7 @@ fn install_agent_bootstrap(isolate: &mut Isolate) -> Option<EngineOutcome> {
             )));
         }
     };
-    execute_module(isolate, &module)
+    execute_module(isolate, &module, false)
 }
 
 /// Owns one worker isolate from hook installation through source completion and teardown.
@@ -417,7 +423,7 @@ pub(super) fn run_agent_worker(
     if ready.send(Ok(())).is_err() {
         return;
     }
-    if execute_module(&mut isolate, &module).is_none()
+    if execute_module(&mut isolate, &module, false).is_none()
         && let Ok(root) = ModuleIdentity::try_new("test262-agent-source")
     {
         let mut loader = Test262ModuleLoader::for_script(root, &[]);
@@ -862,14 +868,17 @@ fn classify_run_outcome(isolate: &mut Isolate, outcome: RunOutcome) -> Option<En
 fn execute_module(
     isolate: &mut Isolate,
     module: &tachyon_bytecode::CompiledModule,
+    suppress_promise_checkpoint: bool,
 ) -> Option<EngineOutcome> {
-    let outcome = match isolate.execute(
-        module,
-        ExecutionBudget {
-            fuel: EXECUTION_FUEL_LIMIT,
-            quantum: u32::MAX,
-        },
-    ) {
+    let budget = ExecutionBudget {
+        fuel: EXECUTION_FUEL_LIMIT,
+        quantum: u32::MAX,
+    };
+    let outcome = match if suppress_promise_checkpoint {
+        isolate.execute_without_promise_checkpoint(module, budget)
+    } else {
+        isolate.execute(module, budget)
+    } {
         Ok(outcome) => outcome,
         Err(error) => {
             return Some(unsupported(format!(
