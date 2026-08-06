@@ -498,7 +498,7 @@ impl EnvironmentPlans {
             Some(hir.root_scope()),
             &mut entry_slots,
         )?;
-        entry_slots.retain(|slot| !iteration_bindings.contains(&slot.id));
+        remove_iteration_slots(&mut entry_slots, &iteration_bindings)?;
         let mut functions = Vec::with_capacity(hir.functions().len());
         let mut function_self_bindings = Vec::with_capacity(hir.functions().len());
         for function in hir.functions() {
@@ -584,7 +584,7 @@ impl EnvironmentPlans {
                 None,
                 &mut slots,
             )?;
-            slots.retain(|slot| !iteration_bindings.contains(&slot.id));
+            remove_iteration_slots(&mut slots, &iteration_bindings)?;
             functions.push(FunctionEnvironmentPlan {
                 scope: function.scope,
                 slots,
@@ -890,6 +890,18 @@ fn push_captured_slot(
     Ok(())
 }
 
+/// Removes bindings owned by per-iteration records and restores the owner's contiguous slots.
+fn remove_iteration_slots(
+    slots: &mut Vec<CapturedSlot>,
+    iteration_bindings: &[BindingId],
+) -> Result<(), CompileError> {
+    slots.retain(|slot| !iteration_bindings.contains(&slot.id));
+    for (index, slot) in slots.iter_mut().enumerate() {
+        slot.slot = u32::try_from(index).map_err(|_| CompileError::BindingOverflow)?;
+    }
+    Ok(())
+}
+
 /// Reserves the lexical self binding for a named function expression even without a nested capture.
 fn push_function_name_slot(
     binding: &crate::HirBinding,
@@ -946,7 +958,7 @@ fn collect_iteration_environments(
     statements: &[HirStatement],
     environments: &mut Vec<IterationEnvironmentPlan>,
 ) -> Result<(), CompileError> {
-    for statement in statements {
+    for statement in statements.iter() {
         match &statement.kind {
             HirStatementKind::ForIn { left, body, .. }
             | HirStatementKind::ForOf { left, body, .. } => {
@@ -958,13 +970,17 @@ fn collect_iteration_environments(
                         .declarators
                         .first()
                         .expect("HIR validates one loop-head declarator");
-                    let bindings = pattern_bindings(&declarator.pattern)
-                        .into_iter()
-                        .filter(|binding| binding.captured)
-                        .collect::<Vec<_>>();
-                    if let Some(scope) = bindings.first().map(|binding| binding.scope) {
-                        let mut slots = Vec::with_capacity(bindings.len());
-                        for binding in bindings {
+                    let head_bindings = pattern_bindings(&declarator.pattern);
+                    if let Some(scope) = head_bindings.first().map(|binding| binding.scope) {
+                        let mut body_bindings = Vec::new();
+                        collect_direct_iteration_body_bindings(body, &mut body_bindings);
+                        let capacity = head_bindings
+                            .len()
+                            .checked_add(body_bindings.len())
+                            .ok_or(CompileError::BindingOverflow)?;
+                        let mut slots = Vec::with_capacity(capacity);
+                        for binding in head_bindings.into_iter().filter(|binding| binding.captured)
+                        {
                             let slot = u32::try_from(slots.len())
                                 .map_err(|_| CompileError::BindingOverflow)?;
                             slots.push(CapturedSlot {
@@ -976,7 +992,21 @@ fn collect_iteration_environments(
                                 parameter: false,
                             });
                         }
-                        environments.push(IterationEnvironmentPlan { scope, slots });
+                        for (binding, mutable) in body_bindings {
+                            let slot = u32::try_from(slots.len())
+                                .map_err(|_| CompileError::BindingOverflow)?;
+                            slots.push(CapturedSlot {
+                                id: binding.id,
+                                slot,
+                                name: binding.name,
+                                mutable,
+                                initialized: false,
+                                parameter: false,
+                            });
+                        }
+                        if !slots.is_empty() {
+                            environments.push(IterationEnvironmentPlan { scope, slots });
+                        }
                     }
                 }
                 collect_iteration_environments(core::slice::from_ref(body), environments)?;
@@ -1031,6 +1061,33 @@ fn collect_iteration_environments(
         }
     }
     Ok(())
+}
+
+/// Collects captured lexical declarations instantiated by the loop body's direct block entry.
+fn collect_direct_iteration_body_bindings(
+    body: &HirStatement,
+    bindings: &mut Vec<(crate::HirBinding, bool)>,
+) {
+    let HirStatementKind::Block(statements) = &body.kind else {
+        return;
+    };
+    for statement in statements.iter() {
+        let HirStatementKind::VariableDeclaration(declaration) = &statement.kind else {
+            continue;
+        };
+        if declaration.kind == HirVariableDeclarationKind::Var {
+            continue;
+        }
+        let mutable = declaration.kind == HirVariableDeclarationKind::Let;
+        for declarator in declaration.declarators.iter() {
+            bindings.extend(
+                pattern_bindings(&declarator.pattern)
+                    .into_iter()
+                    .filter(|binding| binding.captured)
+                    .map(|binding| (binding, mutable)),
+            );
+        }
+    }
 }
 
 /// Walks activation-owned declarations while nested function bodies remain separate stencils.

@@ -560,6 +560,66 @@ fn compiler_promotes_root_block_lexicals_captured_by_nested_functions() {
 }
 
 #[test]
+/// Moves direct captured loop-body lexicals into the same fresh per-iteration record.
+fn compiler_extracts_entry_loop_body_captures_into_iteration_records() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "for (const iteration of [1]) { (() => iteration); const trailing = 2; (() => trailing); }",
+            ),
+            CompileOptions::default(),
+        )
+        .expect("iteration extraction preserves fresh loop-body bindings");
+    let entry = module
+        .function(tachyon_bytecode::FunctionId::new(0))
+        .expect("entry function is frozen");
+    assert_eq!(entry.layout().environment_slot_count, 0);
+    assert!(entry.binding_plan().iter().any(|binding| {
+        binding.name.as_ref() == "trailing"
+            && matches!(
+                binding.location,
+                tachyon_bytecode::BindingLocation::LexicalEnvironment { depth: 0, slot: 1 }
+            )
+    }));
+}
+
+#[test]
+/// Applies fresh direct loop-body capture ownership inside ordinary functions as well.
+fn compiler_extracts_function_loop_body_captures_into_iteration_records() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "function owner() { for (const iteration of [1]) { (() => iteration); const trailing = 2; return () => trailing; } }",
+            ),
+            CompileOptions::default(),
+        )
+        .expect("function iteration extraction preserves fresh loop-body bindings");
+    let owner = module
+        .functions()
+        .iter()
+        .find(|function| {
+            function.binding_plan().iter().any(|binding| {
+                binding.name.as_ref() == "trailing"
+                    && matches!(
+                        binding.location,
+                        tachyon_bytecode::BindingLocation::LexicalEnvironment { depth: 0, slot: 1 }
+                    )
+            })
+        })
+        .expect("ordinary function owner is frozen");
+    assert_eq!(owner.layout().environment_slot_count, 0);
+    assert!(owner.binding_plan().iter().any(|binding| {
+        binding.name.as_ref() == "trailing"
+            && matches!(
+                binding.location,
+                tachyon_bytecode::BindingLocation::LexicalEnvironment { depth: 0, slot: 1 }
+            )
+    }));
+}
+
+#[test]
 /// Freezes exact owner states into storage reserved from the captured-slot count.
 fn compiler_freezes_captured_slot_state_and_record_metadata() {
     let module = Compiler
