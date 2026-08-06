@@ -124,6 +124,10 @@ if (!(throws(TypeError, function() { return 1n + 1; }) &&
       throws(RangeError, function() { return 2n ** -1n; }))) failure = 7;
 if (!(postfix === 1n && prefix === 3n && updated === 3n &&
       updated-- === 3n && --updated === 1n)) failure = 8;
+if (!(10n < 11 && 10n <= 10 && 10n > 9 && 10n >= 10 &&
+      9007199254740993n > 9007199254740992 &&
+      9007199254740993n < 9007199254740994 &&
+      -2n < -1.5 && -1n > -1.5 && !(1n < NaN))) failure = 9;
 failure;
 "#;
 

@@ -277,6 +277,17 @@ impl BigIntValue {
             .then_with(|| self.limbs.iter().rev().cmp(other.limbs.iter().rev()))
     }
 
+    /// Compares canonical signed magnitudes without converting either side to Number.
+    #[inline(always)]
+    fn mathematical_cmp(&self, other: &Self) -> core::cmp::Ordering {
+        match (self.negative, other.negative) {
+            (true, false) => core::cmp::Ordering::Less,
+            (false, true) => core::cmp::Ordering::Greater,
+            (false, false) => self.magnitude_cmp(other),
+            (true, true) => self.magnitude_cmp(other).reverse(),
+        }
+    }
+
     /// Adds two canonical values with one exact result-capacity allocation.
     fn add(&self, other: &Self) -> Result<Self, BigIntArithmeticError> {
         if self.negative == other.negative {
@@ -1127,6 +1138,35 @@ impl Isolate {
                 Ok(left == right)
             })
         })
+    }
+
+    /// Compares one BigInt with a binary64 Number exactly enough for relational semantics.
+    pub(crate) fn bigint_compare_number(
+        &mut self,
+        bigint: Value,
+        number: f64,
+    ) -> Result<Option<core::cmp::Ordering>, ExecutionError> {
+        if number.is_nan() {
+            return Ok(None);
+        }
+        if number == f64::INFINITY {
+            return Ok(Some(core::cmp::Ordering::Less));
+        }
+        if number == f64::NEG_INFINITY {
+            return Ok(Some(core::cmp::Ordering::Greater));
+        }
+        let bigint = self.bigint_value_snapshot(bigint)?;
+        let integer = BigIntValue::from_integral_f64(number.trunc())
+            .map_err(|_| ExecutionError::InvalidBigIntNumber(Value::from_f64(number)))?;
+        let ordering = bigint.mathematical_cmp(&integer);
+        if !ordering.is_eq() || number.fract() == 0.0 {
+            return Ok(Some(ordering));
+        }
+        Ok(Some(if number.is_sign_negative() {
+            core::cmp::Ordering::Greater
+        } else {
+            core::cmp::Ordering::Less
+        }))
     }
 
     /// Returns canonical decimal bytes for either BigInt representation.

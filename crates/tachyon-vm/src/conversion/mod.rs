@@ -2202,9 +2202,28 @@ impl Isolate {
                 Immediate::False
             }));
         }
-        let left = self.convert_to_number(left)?;
-        let right = self.convert_to_number(right)?;
-        Ok(numeric_relational(opcode, left, right))
+        let ordering = if self.is_bigint_value(left) {
+            let right = numeric_value(self.convert_to_number(right)?)
+                .ok_or(ExecutionError::UnsupportedNumberConversion(right))?;
+            self.bigint_compare_number(left, right)?
+        } else if self.is_bigint_value(right) {
+            let left = numeric_value(self.convert_to_number(left)?)
+                .ok_or(ExecutionError::UnsupportedNumberConversion(left))?;
+            self.bigint_compare_number(right, left)?
+                .map(core::cmp::Ordering::reverse)
+        } else {
+            let left = self.convert_to_number(left)?;
+            let right = self.convert_to_number(right)?;
+            return Ok(numeric_relational(opcode, left, right));
+        };
+        let result = ordering.is_some_and(|ordering| match opcode {
+            Opcode::LessThan => ordering.is_lt(),
+            Opcode::GreaterThan => ordering.is_gt(),
+            Opcode::LessEqual => ordering.is_le(),
+            Opcode::GreaterEqual => ordering.is_ge(),
+            _ => unreachable!("relational consumer received a non-relational opcode"),
+        });
+        Ok(boolean_value(result))
     }
 
     /// Publishes one runtime-created string through the ordinary managed external allocation path.
