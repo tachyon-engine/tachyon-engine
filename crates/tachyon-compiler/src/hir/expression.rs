@@ -310,9 +310,16 @@ pub enum HirExpressionKind {
         arguments: Arc<[HirArrayExpressionPart]>,
     },
     SuperCall(Arc<[HirExpression]>),
+    /// A `super(...)` call whose ordered arguments contain iterator spread.
+    SuperCallSpread(Arc<[HirArrayExpressionPart]>),
     New {
         callee: Box<HirExpression>,
         arguments: Arc<[HirExpression]>,
+    },
+    /// A construction whose ordered argument list contains at least one iterator spread.
+    NewSpread {
+        callee: Box<HirExpression>,
+        arguments: Arc<[HirArrayExpressionPart]>,
     },
 }
 
@@ -913,18 +920,27 @@ pub(super) fn lower_expression(
         Expression::CallExpression(expression)
             if !expression.optional && matches!(expression.callee, Expression::Super(_)) =>
         {
-            let mut arguments = Vec::with_capacity(expression.arguments.len());
-            for argument in &expression.arguments {
-                let argument = argument.as_expression().ok_or_else(|| {
-                    unsupported(
-                        source.name(),
-                        source_span(argument.span()),
-                        "spread super argument",
-                    )
-                })?;
-                arguments.push(lower_expression(argument, source, semantic, functions)?);
+            if expression
+                .arguments
+                .iter()
+                .any(|argument| argument.is_spread())
+            {
+                HirExpressionKind::SuperCallSpread(lower_chain_arguments(
+                    &expression.arguments,
+                    source,
+                    semantic,
+                    functions,
+                )?)
+            } else {
+                let mut arguments = Vec::with_capacity(expression.arguments.len());
+                for argument in &expression.arguments {
+                    let argument = argument
+                        .as_expression()
+                        .expect("non-spread super argument is an expression");
+                    arguments.push(lower_expression(argument, source, semantic, functions)?);
+                }
+                HirExpressionKind::SuperCall(arguments.into())
             }
-            HirExpressionKind::SuperCall(arguments.into())
         }
         Expression::CallExpression(expression) if !expression.optional => {
             let callee = Box::new(lower_expression(
@@ -974,25 +990,38 @@ pub(super) fn lower_expression(
             }
         }
         Expression::NewExpression(expression) if expression.type_arguments.is_none() => {
-            let mut arguments = Vec::with_capacity(expression.arguments.len());
-            for argument in &expression.arguments {
-                let argument = argument.as_expression().ok_or_else(|| {
-                    unsupported(
-                        source.name(),
-                        source_span(argument.span()),
-                        "spread constructor argument",
-                    )
-                })?;
-                arguments.push(lower_expression(argument, source, semantic, functions)?);
-            }
-            HirExpressionKind::New {
-                callee: Box::new(lower_expression(
-                    &expression.callee,
-                    source,
-                    semantic,
-                    functions,
-                )?),
-                arguments: arguments.into(),
+            let callee = Box::new(lower_expression(
+                &expression.callee,
+                source,
+                semantic,
+                functions,
+            )?);
+            if expression
+                .arguments
+                .iter()
+                .any(|argument| argument.is_spread())
+            {
+                HirExpressionKind::NewSpread {
+                    callee,
+                    arguments: lower_chain_arguments(
+                        &expression.arguments,
+                        source,
+                        semantic,
+                        functions,
+                    )?,
+                }
+            } else {
+                let mut arguments = Vec::with_capacity(expression.arguments.len());
+                for argument in &expression.arguments {
+                    let argument = argument
+                        .as_expression()
+                        .expect("non-spread constructor argument is an expression");
+                    arguments.push(lower_expression(argument, source, semantic, functions)?);
+                }
+                HirExpressionKind::New {
+                    callee,
+                    arguments: arguments.into(),
+                }
             }
         }
         Expression::ClassExpression(class) => {
@@ -1182,20 +1211,25 @@ fn lower_chain_call(
         if call.optional {
             return Err(unsupported(source.name(), span, "optional super call"));
         }
-        let mut arguments = Vec::with_capacity(call.arguments.len());
-        for argument in &call.arguments {
-            let argument = argument.as_expression().ok_or_else(|| {
-                unsupported(
-                    source.name(),
-                    source_span(argument.span()),
-                    "spread super argument",
-                )
-            })?;
-            arguments.push(lower_expression(argument, source, semantic, functions)?);
-        }
         return Ok(ChainLowered::Prefix(HirExpression {
             span,
-            kind: HirExpressionKind::SuperCall(arguments.into()),
+            kind: if call.arguments.iter().any(|argument| argument.is_spread()) {
+                HirExpressionKind::SuperCallSpread(lower_chain_arguments(
+                    &call.arguments,
+                    source,
+                    semantic,
+                    functions,
+                )?)
+            } else {
+                let mut arguments = Vec::with_capacity(call.arguments.len());
+                for argument in &call.arguments {
+                    let argument = argument
+                        .as_expression()
+                        .expect("non-spread super argument is an expression");
+                    arguments.push(lower_expression(argument, source, semantic, functions)?);
+                }
+                HirExpressionKind::SuperCall(arguments.into())
+            },
         }));
     }
     let callee = lower_chain_operand(&call.callee, source, semantic, functions)?;

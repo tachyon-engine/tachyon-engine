@@ -280,7 +280,10 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
             " r{}, receiver=r{}, argc={}",
             operands[0], operands[1], operands[2]
         )?,
-        Opcode::CallSpread | Opcode::TailCallSpread | Opcode::DirectEvalSpread => write!(
+        Opcode::CallSpread
+        | Opcode::TailCallSpread
+        | Opcode::DirectEvalSpread
+        | Opcode::ConstructSpread => write!(
             output,
             " r{}, callee=r{}, arguments=r{}",
             operands[0], operands[1], operands[2]
@@ -324,6 +327,9 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
             operands[1] + 1,
             operands[2]
         )?,
+        Opcode::SuperConstructSpread => {
+            write!(output, " r{}, arguments=r{}", operands[0], operands[1])?
+        }
         Opcode::DynamicImport => write!(
             output,
             " r{}, source=r{}, options=r{}",

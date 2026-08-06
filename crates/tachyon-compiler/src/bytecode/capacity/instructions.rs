@@ -823,7 +823,8 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             }
             Ok(count)
         }
-        HirExpressionKind::CallSpread { callee, arguments } => {
+        HirExpressionKind::CallSpread { callee, arguments }
+        | HirExpressionKind::NewSpread { callee, arguments } => {
             let mut count = checked_count_add(
                 expression_instruction_count(callee)?,
                 4,
@@ -853,6 +854,23 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                     "bytecode instructions",
                 )?;
                 count = checked_count_add(count, 1, "bytecode instructions")?;
+            }
+            Ok(count)
+        }
+        HirExpressionKind::SuperCallSpread(arguments) => {
+            let mut count = 3;
+            for argument in arguments.iter() {
+                let (expression, own) = match argument {
+                    crate::hir::HirArrayExpressionPart::Element(expression) => (expression, 3),
+                    crate::hir::HirArrayExpressionPart::Spread(expression) => (expression, 16),
+                    crate::hir::HirArrayExpressionPart::Elision => continue,
+                };
+                count = checked_count_add(
+                    count,
+                    expression_instruction_count(expression)?,
+                    "bytecode instructions",
+                )?;
+                count = checked_count_add(count, own, "bytecode instructions")?;
             }
             Ok(count)
         }

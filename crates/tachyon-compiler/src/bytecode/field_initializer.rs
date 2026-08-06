@@ -282,7 +282,8 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<BindingId>)
                 }
             }
         }
-        HirExpressionKind::CallSpread { callee, arguments } => {
+        HirExpressionKind::CallSpread { callee, arguments }
+        | HirExpressionKind::NewSpread { callee, arguments } => {
             collect_expression(callee, bindings);
             for argument in arguments.iter() {
                 match argument {
@@ -297,6 +298,17 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<BindingId>)
         HirExpressionKind::SuperCall(arguments) => {
             for argument in arguments.iter() {
                 collect_expression(argument, bindings);
+            }
+        }
+        HirExpressionKind::SuperCallSpread(arguments) => {
+            for argument in arguments.iter() {
+                match argument {
+                    HirArrayExpressionPart::Element(expression)
+                    | HirArrayExpressionPart::Spread(expression) => {
+                        collect_expression(expression, bindings);
+                    }
+                    HirArrayExpressionPart::Elision => {}
+                }
             }
         }
         HirExpressionKind::Class(class) => {

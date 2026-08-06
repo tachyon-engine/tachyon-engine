@@ -1145,8 +1145,14 @@ impl Lowerer<'_> {
             HirExpressionKind::SuperCall(arguments) => {
                 self.super_call_expression(arguments, expression.span)
             }
+            HirExpressionKind::SuperCallSpread(arguments) => {
+                self.super_spread_construct_expression(arguments, expression.span)
+            }
             HirExpressionKind::New { callee, arguments } => {
                 self.construct_expression(callee, arguments, expression.span)
+            }
+            HirExpressionKind::NewSpread { callee, arguments } => {
+                self.construct_spread_expression(callee, arguments, expression.span)
             }
         }
     }
@@ -1903,6 +1909,30 @@ impl Lowerer<'_> {
         self.emit(
             Opcode::SuperConstruct,
             &[destination.index(), argument_base.index(), count],
+            span,
+        )?;
+        self.emit(Opcode::InitializeThis, &[destination.index()], span)?;
+        if self.initialize_instance_elements {
+            self.emit(
+                Opcode::InitializeInstanceElements,
+                &[destination.index()],
+                span,
+            )?;
+        }
+        Ok(destination)
+    }
+
+    /// Materializes spread arguments before invoking the active derived superclass.
+    fn super_spread_construct_expression(
+        &mut self,
+        arguments: &[HirArrayExpressionPart],
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let arguments = self.array_accumulation(arguments, span)?;
+        let destination = self.register()?;
+        self.emit(
+            Opcode::SuperConstructSpread,
+            &[destination.index(), arguments.index()],
             span,
         )?;
         self.emit(Opcode::InitializeThis, &[destination.index()], span)?;
@@ -3373,6 +3403,24 @@ impl Lowerer<'_> {
         self.emit(
             Opcode::Construct,
             &[destination.index(), call_base.index(), argument_count],
+            span,
+        )?;
+        Ok(destination)
+    }
+
+    /// Evaluates a constructor before materializing its iterator-spread argument list.
+    pub(in crate::bytecode) fn construct_spread_expression(
+        &mut self,
+        callee: &HirExpression,
+        arguments: &[HirArrayExpressionPart],
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let callee = self.expression(callee)?;
+        let arguments = self.array_accumulation(arguments, span)?;
+        let destination = self.register()?;
+        self.emit(
+            Opcode::ConstructSpread,
+            &[destination.index(), callee.index(), arguments.index()],
             span,
         )?;
         Ok(destination)

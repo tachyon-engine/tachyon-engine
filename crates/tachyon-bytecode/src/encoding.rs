@@ -331,9 +331,13 @@ pub enum Opcode {
     InitializeLexicalEnvironment = 142,
     /// Restores the lexical environment active before the block-scoped environment.
     LeaveLexicalEnvironment = 143,
+    /// Constructs with arguments materialized in an engine-private Array.
+    ConstructSpread = 144,
+    /// Constructs the active derived superclass from an engine-private argument Array.
+    SuperConstructSpread = 145,
 }
 
-pub(super) const OPCODE_COUNT: usize = 144;
+pub(super) const OPCODE_COUNT: usize = 146;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -479,10 +483,12 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     2, // EnterLexicalEnvironment
     2, // InitializeLexicalEnvironment
     0, // LeaveLexicalEnvironment
+    3, // ConstructSpread
+    2, // SuperConstructSpread
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::LeaveLexicalEnvironment as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::SuperConstructSpread as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -672,6 +678,8 @@ impl Opcode {
             77 => Some(Self::EnterLexicalEnvironment),
             78 => Some(Self::InitializeLexicalEnvironment),
             79 => Some(Self::LeaveLexicalEnvironment),
+            80 => Some(Self::ConstructSpread),
+            81 => Some(Self::SuperConstructSpread),
             _ => None,
         }
     }

@@ -58,6 +58,54 @@ function loop(count) {
 loop(100);
 "#;
 
+const CONSTRUCT_SPREAD_SOURCE: &str = r#"
+var trace = "";
+function Constructor(a, b, c) {
+  trace += "c";
+  this.sum = a + b + c;
+  this.correctTarget = new.target === Constructor;
+}
+var holder = {};
+Object.defineProperty(holder, "ctor", {
+  get: function() { trace += "g"; return Constructor; }
+});
+var iterable = {};
+iterable[Symbol.iterator] = function() {
+  trace += "i";
+  var index = 1;
+  return {
+    next: function() {
+      trace += "n";
+      index += 1;
+      if (index > 3) return { done: true };
+      return { done: false, value: index };
+    }
+  };
+};
+var instance = new holder.ctor(1, ...iterable);
+instance instanceof Constructor && instance.sum === 6 && instance.correctTarget &&
+  trace === "ginnnc";
+"#;
+
+const SUPER_CONSTRUCT_SPREAD_SOURCE: &str = r#"
+var trace = "";
+function Base(a, b, c) {
+  trace += "b";
+  this.sum = a + b + c;
+  this.correctTarget = new.target === Derived;
+}
+class Derived extends Base {
+  constructor(...args) {
+    trace += "d";
+    super(1, ...args);
+    this.initialized = true;
+  }
+}
+var instance = new Derived(...[2, 3]);
+instance instanceof Derived && instance instanceof Base && instance.sum === 6 &&
+  instance.correctTarget && instance.initialized && trace === "db";
+"#;
+
 #[test]
 fn call_spread_preserves_order_receiver_and_multiple_spreads_for_every_batch() {
     assert_call_spread::<1>(CALL_SPREAD_SOURCE, 3_401, false);
@@ -85,6 +133,34 @@ fn call_spread_tail_path_reuses_frames_for_every_dispatch_batch() {
     assert_call_spread::<4>(CALL_SPREAD_TAIL_SOURCE, 3_454, false);
     assert_call_spread::<8>(CALL_SPREAD_TAIL_SOURCE, 3_458, false);
     assert_call_spread::<16>(CALL_SPREAD_TAIL_SOURCE, 3_466, false);
+}
+
+#[test]
+fn construct_spread_preserves_order_new_target_and_gc_roots_for_every_batch() {
+    assert_call_spread::<1>(CONSTRUCT_SPREAD_SOURCE, 3_471, false);
+    assert_call_spread::<2>(CONSTRUCT_SPREAD_SOURCE, 3_472, false);
+    assert_call_spread::<4>(CONSTRUCT_SPREAD_SOURCE, 3_474, false);
+    assert_call_spread::<8>(CONSTRUCT_SPREAD_SOURCE, 3_478, false);
+    assert_call_spread::<16>(CONSTRUCT_SPREAD_SOURCE, 3_486, false);
+    assert_call_spread::<1>(CONSTRUCT_SPREAD_SOURCE, 3_491, true);
+    assert_call_spread::<2>(CONSTRUCT_SPREAD_SOURCE, 3_492, true);
+    assert_call_spread::<4>(CONSTRUCT_SPREAD_SOURCE, 3_494, true);
+    assert_call_spread::<8>(CONSTRUCT_SPREAD_SOURCE, 3_498, true);
+    assert_call_spread::<16>(CONSTRUCT_SPREAD_SOURCE, 3_506, true);
+}
+
+#[test]
+fn super_construct_spread_forwards_new_target_and_initializes_this_for_every_batch() {
+    assert_call_spread::<1>(SUPER_CONSTRUCT_SPREAD_SOURCE, 3_511, false);
+    assert_call_spread::<2>(SUPER_CONSTRUCT_SPREAD_SOURCE, 3_512, false);
+    assert_call_spread::<4>(SUPER_CONSTRUCT_SPREAD_SOURCE, 3_514, false);
+    assert_call_spread::<8>(SUPER_CONSTRUCT_SPREAD_SOURCE, 3_518, false);
+    assert_call_spread::<16>(SUPER_CONSTRUCT_SPREAD_SOURCE, 3_526, false);
+    assert_call_spread::<1>(SUPER_CONSTRUCT_SPREAD_SOURCE, 3_531, true);
+    assert_call_spread::<2>(SUPER_CONSTRUCT_SPREAD_SOURCE, 3_532, true);
+    assert_call_spread::<4>(SUPER_CONSTRUCT_SPREAD_SOURCE, 3_534, true);
+    assert_call_spread::<8>(SUPER_CONSTRUCT_SPREAD_SOURCE, 3_538, true);
+    assert_call_spread::<16>(SUPER_CONSTRUCT_SPREAD_SOURCE, 3_546, true);
 }
 
 /// Compiles and executes one spread-call fixture under a selected dispatch and GC policy.

@@ -357,7 +357,10 @@ pub(super) fn validate_class_instructions(
         })?;
         if matches!(
             instruction.opcode,
-            Opcode::SuperConstruct | Opcode::SuperConstructForwardAll | Opcode::InitializeThis
+            Opcode::SuperConstruct
+                | Opcode::SuperConstructSpread
+                | Opcode::SuperConstructForwardAll
+                | Opcode::InitializeThis
         ) && kind != FunctionKind::DerivedClassConstructor
         {
             return Err(ModuleBuildError::InvalidClassInstruction {
@@ -1124,7 +1127,8 @@ fn verify_instruction(
         | Opcode::TailCallSpread
         | Opcode::CallSpreadWithReceiver
         | Opcode::TailCallSpreadWithReceiver
-        | Opcode::DirectEvalSpread => {
+        | Opcode::DirectEvalSpread
+        | Opcode::ConstructSpread => {
             check_register(operands[0])?;
             check_register(operands[1])?;
             check_register(operands[2])?;
@@ -1142,6 +1146,10 @@ fn verify_instruction(
                     register_count: context.register_count,
                 });
             }
+        }
+        Opcode::SuperConstructSpread => {
+            check_register(operands[0])?;
+            check_register(operands[1])?;
         }
         Opcode::InitialYield => {}
         Opcode::Await | Opcode::Yield => {

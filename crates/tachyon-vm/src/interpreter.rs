@@ -1956,7 +1956,8 @@ impl Isolate {
             | Opcode::TailCallSpread
             | Opcode::DirectEvalSpread
             | Opcode::CallSpreadWithReceiver
-            | Opcode::TailCallSpreadWithReceiver => {
+            | Opcode::TailCallSpreadWithReceiver
+            | Opcode::ConstructSpread => {
                 let with_receiver = matches!(
                     opcode,
                     Opcode::CallSpreadWithReceiver | Opcode::TailCallSpreadWithReceiver
@@ -1974,7 +1975,13 @@ impl Isolate {
                         ArgumentListOperation::TailCall
                     }
                     Opcode::DirectEvalSpread => ArgumentListOperation::DirectEval,
+                    Opcode::ConstructSpread => ArgumentListOperation::Construct,
                     _ => ArgumentListOperation::Call,
+                };
+                let new_target = if operation == ArgumentListOperation::Construct {
+                    callee
+                } else {
+                    Value::from_immediate(Immediate::Undefined)
                 };
                 return self
                     .begin_internal_spread_call(
@@ -1996,6 +2003,7 @@ impl Isolate {
                         argument_list,
                         callee,
                         receiver,
+                        new_target,
                         operation,
                     )
                     .map(|_| None);
@@ -2014,6 +2022,9 @@ impl Isolate {
                 operands[2],
                 instruction_offset,
             )?,
+            Opcode::SuperConstructSpread => {
+                self.super_construct_spread(base, operands[0], operands[1], instruction_offset)?
+            }
             Opcode::SuperConstructForwardAll => {
                 self.super_construct_forward_all(base, operands[0], instruction_offset)?;
             }
@@ -5214,6 +5225,56 @@ impl Isolate {
             construct_receiver: None,
             call_site,
         })
+    }
+
+    /// Constructs the active superclass from a compiler-private spread argument Array.
+    fn super_construct_spread(
+        &mut self,
+        caller_base: u32,
+        destination: u32,
+        argument_list_register: u32,
+        call_site: WordOffset,
+    ) -> Result<(), ExecutionError> {
+        let activation = self
+            .fiber
+            .derived_activations
+            .last()
+            .copied()
+            .filter(|activation| activation.frame_depth as usize == self.fiber.frames.len())
+            .ok_or(ExecutionError::UninitializedThis)?;
+        let superclass = self.object_snapshot(activation.function)?.1.prototype;
+        if !self.is_constructor_value(superclass)? {
+            return Err(ExecutionError::NonConstructor(superclass));
+        }
+        let new_target = self
+            .fiber
+            .frames
+            .last()
+            .expect("super construction retains its derived frame")
+            .new_target;
+        let argument_list = self.read(caller_base, argument_list_register)?;
+        self.begin_internal_spread_call(
+            &CallSite {
+                caller_base,
+                destination,
+                callee: superclass,
+                argument_base: 0,
+                argument_source: None,
+                argument_prefix: None,
+                argument_prefix_offset: 0,
+                argument_prefix_count: 0,
+                argument_count: 0,
+                this_value: Value::from_immediate(Immediate::Undefined),
+                new_target,
+                construct_receiver: None,
+                call_site,
+            },
+            argument_list,
+            superclass,
+            Value::from_immediate(Immediate::Undefined),
+            new_target,
+            ArgumentListOperation::Construct,
+        )
     }
 
     /// Constructs the current superclass while forwarding the active frame's complete argument view.

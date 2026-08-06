@@ -1203,7 +1203,8 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             }
             Ok(count)
         }
-        HirExpressionKind::CallSpread { callee, arguments } => {
+        HirExpressionKind::CallSpread { callee, arguments }
+        | HirExpressionKind::NewSpread { callee, arguments } => {
             let mut count = expression_label_count(callee)?;
             for argument in arguments.iter() {
                 let (expression, own) = match argument {
@@ -1225,6 +1226,22 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             for argument in arguments.iter() {
                 count =
                     checked_count_add(count, expression_label_count(argument)?, "bytecode labels")?;
+            }
+            Ok(count)
+        }
+        HirExpressionKind::SuperCallSpread(arguments) => {
+            let mut count = 0;
+            for argument in arguments.iter() {
+                let expression = match argument {
+                    crate::hir::HirArrayExpressionPart::Element(expression)
+                    | crate::hir::HirArrayExpressionPart::Spread(expression) => expression,
+                    crate::hir::HirArrayExpressionPart::Elision => continue,
+                };
+                count = checked_count_add(
+                    count,
+                    expression_label_count(expression)?,
+                    "bytecode labels",
+                )?;
             }
             Ok(count)
         }

@@ -19,6 +19,7 @@ pub(crate) enum ArgumentListOperation {
     Call,
     TailCall,
     DirectEval,
+    Construct,
 }
 
 /// GC-owned state retained while an observable `length` or indexed `Get` is executing.
@@ -73,17 +74,12 @@ impl Isolate {
         source: Value,
         target: Value,
         this_value: Value,
+        new_target: Value,
         operation: ArgumentListOperation,
     ) -> Result<(), ExecutionError> {
         let Some(arguments) = self.packed_array_values(source)? else {
-            return self.begin_argument_list(
-                site,
-                source,
-                target,
-                this_value,
-                Value::from_immediate(Immediate::Undefined),
-                operation,
-            );
+            return self
+                .begin_argument_list(site, source, target, this_value, new_target, operation);
         };
         let length_atom = self.length_atom()?;
         let length = self
@@ -92,14 +88,8 @@ impl Isolate {
             .filter(|length| length.is_finite() && *length >= 0.0 && length.fract() == 0.0)
             .and_then(|length| usize::try_from(length as u64).ok());
         if length != Some(arguments.len()) {
-            return self.begin_argument_list(
-                site,
-                source,
-                target,
-                this_value,
-                Value::from_immediate(Immediate::Undefined),
-                operation,
-            );
+            return self
+                .begin_argument_list(site, source, target, this_value, new_target, operation);
         }
         let continuation_site = NativeContinuationSite {
             caller_base: site.caller_base,
@@ -110,6 +100,7 @@ impl Isolate {
             continuation_site,
             target,
             this_value,
+            new_target,
             arguments,
             operation,
         )
@@ -121,6 +112,7 @@ impl Isolate {
         site: NativeContinuationSite,
         target: Value,
         this_value: Value,
+        new_target: Value,
         arguments: Vec<Value>,
         operation: ArgumentListOperation,
     ) -> Result<(), ExecutionError> {
@@ -143,13 +135,14 @@ impl Isolate {
             argument_prefix_count: argument_count,
             argument_count,
             this_value,
-            new_target: Value::from_immediate(Immediate::Undefined),
+            new_target,
             construct_receiver: None,
             call_site: site.call_site,
         };
         match operation {
             ArgumentListOperation::TailCall => self.tail_call(call_site),
             ArgumentListOperation::Call | ArgumentListOperation::DirectEval => self.call(call_site),
+            ArgumentListOperation::Construct => self.construct_site(call_site),
             _ => Err(ExecutionError::MissingNativeContinuation),
         }
     }
@@ -360,7 +353,9 @@ impl Isolate {
             | ArgumentListOperation::Call
             | ArgumentListOperation::DirectEval => self.call(call_site).map(|_| ()),
             ArgumentListOperation::TailCall => self.tail_call(call_site).map(|_| ()),
-            ArgumentListOperation::ReflectConstruct => self.construct_site(call_site).map(|_| ()),
+            ArgumentListOperation::ReflectConstruct | ArgumentListOperation::Construct => {
+                self.construct_site(call_site).map(|_| ())
+            }
         }
     }
 
