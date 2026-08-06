@@ -358,12 +358,13 @@ fn compiler_emits_dynamic_import_after_source_then_options() {
     )
     .unwrap();
     let source = disassembly.find("Call r1, callee=r0, argc=0").unwrap();
-    let options = disassembly.find("Call r3, callee=r2, argc=0").unwrap();
+    let source_to_string = disassembly.find("ToString r2, r1").unwrap();
+    let options = disassembly.find("Call r4, callee=r3, argc=0").unwrap();
     let dynamic_import = disassembly
-        .find("DynamicImport r4, source=r1, options=r3")
+        .find("DynamicImport r5, source=r2, options=r4")
         .unwrap();
     assert!(
-        source < options && options < dynamic_import,
+        source < source_to_string && source_to_string < options && options < dynamic_import,
         "{disassembly}"
     );
 }
@@ -382,9 +383,9 @@ fn compiler_materializes_undefined_for_missing_dynamic_import_options() {
             .unwrap(),
     )
     .unwrap();
-    assert!(disassembly.contains("LoadUndefined r1"), "{disassembly}");
+    assert!(disassembly.contains("LoadUndefined r2"), "{disassembly}");
     assert!(
-        disassembly.contains("DynamicImport r2, source=r0, options=r1"),
+        disassembly.contains("DynamicImport r3, source=r1, options=r2"),
         "{disassembly}"
     );
 }

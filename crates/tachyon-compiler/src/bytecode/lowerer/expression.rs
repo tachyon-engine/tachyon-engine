@@ -823,6 +823,12 @@ impl Lowerer<'_> {
             }
             HirExpressionKind::DynamicImport { source, options } => {
                 let source = self.expression(source)?;
+                let string_source = self.register()?;
+                self.emit(
+                    Opcode::ToString,
+                    &[string_source.index(), source.index()],
+                    expression.span,
+                )?;
                 let options = if let Some(options) = options {
                     self.expression(options)?
                 } else {
@@ -831,7 +837,7 @@ impl Lowerer<'_> {
                 let destination = self.register()?;
                 self.emit(
                     Opcode::DynamicImport,
-                    &[destination.index(), source.index(), options.index()],
+                    &[destination.index(), string_source.index(), options.index()],
                     expression.span,
                 )?;
                 Ok(destination)
