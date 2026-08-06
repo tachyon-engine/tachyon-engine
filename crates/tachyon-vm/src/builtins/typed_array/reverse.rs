@@ -9,7 +9,7 @@ impl Isolate {
         site: &CallSite,
     ) -> Result<(), ExecutionError> {
         let receiver = site.this_value;
-        let snapshot = self.typed_array_snapshot(receiver)?;
+        let snapshot = self.validated_typed_array_snapshot(receiver)?;
         let data = self.typed_array_backing(snapshot.buffer)?;
         let width = snapshot.kind.byte_width();
         let byte_length = snapshot

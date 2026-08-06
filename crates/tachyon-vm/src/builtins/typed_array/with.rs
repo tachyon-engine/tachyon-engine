@@ -25,8 +25,7 @@ impl Isolate {
     /// Validates the initial fixed view and starts index conversion before value conversion.
     pub(crate) fn begin_typed_array_with(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         let receiver = site.this_value;
-        let snapshot = self.typed_array_snapshot(receiver)?;
-        self.typed_array_backing(snapshot.buffer)?;
+        let snapshot = self.validated_typed_array_snapshot(receiver)?;
         let undefined = Value::from_immediate(Immediate::Undefined);
         let index = self.call_argument(site, 0)?.unwrap_or(undefined);
         let value = self.call_argument(site, 1)?.unwrap_or(undefined);

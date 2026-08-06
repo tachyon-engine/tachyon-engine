@@ -26,8 +26,7 @@ impl Isolate {
     /// Validates the receiver and keeps the all-primitive fill path allocation-free.
     pub(crate) fn begin_typed_array_fill(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         let receiver = site.this_value;
-        let snapshot = self.typed_array_snapshot(receiver)?;
-        self.typed_array_backing(snapshot.buffer)?;
+        let snapshot = self.validated_typed_array_snapshot(receiver)?;
         let undefined = Value::from_immediate(Immediate::Undefined);
         let value = self.call_argument(site, 0)?.unwrap_or(undefined);
         let start = self.call_argument(site, 1)?.unwrap_or(undefined);

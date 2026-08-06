@@ -17,8 +17,7 @@ impl Isolate {
         }
 
         let source = site.this_value;
-        let snapshot = self.typed_array_snapshot(source)?;
-        self.typed_array_backing(snapshot.buffer)?;
+        let snapshot = self.validated_typed_array_snapshot(source)?;
         self.write(site.caller_base, site.destination, source)?;
         let target = self.create_fixed_typed_array_same_kind(snapshot.kind, snapshot.length)?;
         let source = self.read(site.caller_base, site.destination)?;

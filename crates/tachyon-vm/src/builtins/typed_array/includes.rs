@@ -138,7 +138,7 @@ impl Isolate {
         let found = if cursor >= initial_length {
             false
         } else {
-            let snapshot = self.typed_array_snapshot(receiver)?;
+            let snapshot = self.validated_typed_array_snapshot(receiver)?;
             if search.as_immediate() == Some(Immediate::Undefined)
                 && matches!(
                     self.typed_array_backing(snapshot.buffer),
@@ -214,8 +214,7 @@ impl Isolate {
         &mut self,
         receiver: Value,
     ) -> Result<TypedArraySnapshot, ExecutionError> {
-        let snapshot = self.typed_array_snapshot(receiver)?;
-        self.typed_array_backing(snapshot.buffer)?;
+        let snapshot = self.validated_typed_array_snapshot(receiver)?;
         Ok(snapshot)
     }
 

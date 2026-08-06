@@ -9,8 +9,7 @@ impl Isolate {
         site: &CallSite,
     ) -> Result<(), ExecutionError> {
         let source = site.this_value;
-        let snapshot = self.typed_array_snapshot(source)?;
-        self.typed_array_backing(snapshot.buffer)?;
+        let snapshot = self.validated_typed_array_snapshot(source)?;
 
         // The destination register is the moving root for source until both result allocations
         // finish. The raw byte copy itself cannot trigger an engine collection.

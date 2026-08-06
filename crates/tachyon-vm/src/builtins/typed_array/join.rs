@@ -23,8 +23,7 @@ impl Isolate {
     /// Validates the fixed view before separator conversion and preserves its internal length.
     pub(crate) fn begin_typed_array_join(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         let receiver = site.this_value;
-        let snapshot = self.typed_array_snapshot(receiver)?;
-        self.typed_array_backing(snapshot.buffer)?;
+        let snapshot = self.validated_typed_array_snapshot(receiver)?;
         let separator = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));

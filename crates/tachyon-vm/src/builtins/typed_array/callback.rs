@@ -42,8 +42,7 @@ impl Isolate {
         kind: TypedArrayCallbackKind,
     ) -> Result<(), ExecutionError> {
         let receiver = site.this_value;
-        let snapshot = self.typed_array_snapshot(receiver)?;
-        self.typed_array_backing(snapshot.buffer)?;
+        let snapshot = self.validated_typed_array_snapshot(receiver)?;
         let callback = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
