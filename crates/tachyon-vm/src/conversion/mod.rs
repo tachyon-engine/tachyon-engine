@@ -1570,6 +1570,16 @@ impl Isolate {
             return Ok(match consumer {
                 ConversionConsumer::ToNumber => self.convert_to_number(argument)?,
                 ConversionConsumer::ToString => self.primitive_to_string_value(argument)?,
+                ConversionConsumer::DynamicImportSource => {
+                    let specifier = self.string_value_to_utf16(argument)?;
+                    let (_, promise) = self.enqueue_dynamic_import_with_promise(
+                        &specifier,
+                        self.fiber.entry_module,
+                        &[],
+                        receiver,
+                    )?;
+                    promise
+                }
                 ConversionConsumer::StringConcatElement => {
                     unreachable!("String concat conversion resumes inside its state machine")
                 }

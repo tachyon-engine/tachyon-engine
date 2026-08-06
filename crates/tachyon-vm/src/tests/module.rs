@@ -2406,6 +2406,27 @@ fn dynamic_import_opcode_runs_for_every_dispatch_batch() {
 }
 
 #[test]
+fn dynamic_import_rejects_with_the_original_abrupt_source_conversion() {
+    let mut isolate = fixtures::test_isolate();
+    let identity = specifier("memory:dynamic-import-abrupt-source");
+    let module = LoadedModule::precompiled(compile_source_module(
+        2_817,
+        "memory:dynamic-import-abrupt-source",
+        "let marker = {}; import({ toString() { throw marker; } }).catch(reason => reason === marker)",
+    ));
+    let mut loader = PrecompiledGraphLoader::new(vec![(identity.clone(), module)]);
+    let root = isolate.load_module_graph(&mut loader, &identity).unwrap();
+    let RunOutcome::Completed(promise) = isolate.evaluate_module(root).unwrap() else {
+        panic!("dynamic import conversion should return its rejected Promise");
+    };
+    assert_eq!(
+        drive_to_outcome(&mut isolate, promise),
+        PromiseOutcome::Fulfilled(Value::from_immediate(Immediate::True))
+    );
+    assert!(isolate.take_pending_dynamic_import().is_none());
+}
+
+#[test]
 fn dynamic_import_success_retains_promise_through_forced_major_collection() {
     let mut isolate = fixtures::test_isolate();
     let module = isolate

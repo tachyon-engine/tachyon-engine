@@ -320,6 +320,7 @@ pub(crate) enum ConversionConsumer {
     NativeConstruct(ConversionNativeFunction),
     ToNumber,
     ToString,
+    DynamicImportSource,
     StringConcatElement,
     StringFromCodesElement,
     MathArgument,
@@ -471,6 +472,7 @@ impl ConversionConsumer {
             Self::NativeCall(native) | Self::NativeConstruct(native) => Some(native.native()),
             Self::ToNumber
             | Self::ToString
+            | Self::DynamicImportSource
             | Self::StringConcatElement
             | Self::StringFromCodesElement
             | Self::MathArgument
@@ -639,6 +641,7 @@ impl ConversionConsumer {
                 | Self::NativeCall(ConversionNativeFunction::GlobalEncodeUriComponent)
                 | Self::NativeCall(ConversionNativeFunction::DateParse)
                 | Self::ToString
+                | Self::DynamicImportSource
                 | Self::StringConcatElement
                 | Self::StringRawLiteral
                 | Self::StringRawSubstitution
@@ -703,6 +706,7 @@ impl ConversionConsumer {
             self,
             Self::ToNumber
                 | Self::ToString
+                | Self::DynamicImportSource
                 | Self::StringConcatElement
                 | Self::StringFromCodesElement
                 | Self::MathArgument

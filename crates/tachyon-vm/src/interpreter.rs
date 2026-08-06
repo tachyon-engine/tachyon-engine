@@ -2085,16 +2085,59 @@ impl Isolate {
             Opcode::DynamicImport => {
                 let source = self.read(base, operands[1])?;
                 let options = self.read(base, operands[2])?;
-                if !self.is_string_value(source) {
-                    return Err(ExecutionError::UnsupportedPrimitiveStringConversion(source));
-                }
-                if options.as_immediate() != Some(Immediate::Undefined) {
-                    return Err(ExecutionError::NotObject(options));
-                }
-                let specifier = self.string_value_to_utf16(source)?;
-                let (_, promise) =
-                    self.enqueue_dynamic_import(&specifier, self.fiber.entry_module, &[])?;
+                let promise = self.create_promise(
+                    PromiseState::Pending,
+                    Value::from_immediate(Immediate::Undefined),
+                )?;
                 self.write(base, operands[0], promise)?;
+                if options.as_immediate() != Some(Immediate::Undefined)
+                    && !self.is_object_value(options)
+                {
+                    let error = self.create_native_error(NativeErrorKind::Type, None)?;
+                    self.settle_promise(promise, PromiseState::Rejected, error)?;
+                    return Ok(None);
+                }
+                if self.is_object_value(source) {
+                    let conversion = self.dispatch_object_primitive_conversion(
+                        ConversionConsumer::DynamicImportSource,
+                        base,
+                        operands[0],
+                        promise,
+                        source,
+                        instruction_offset,
+                    );
+                    if let Err(error) = conversion {
+                        let reason = match error {
+                            ExecutionError::HostThrown(value) => value,
+                            error => {
+                                let Some(kind) = execution_error_kind(&error) else {
+                                    return Err(error);
+                                };
+                                self.create_native_error(kind, None)?
+                            }
+                        };
+                        self.settle_promise(promise, PromiseState::Rejected, reason)?;
+                    }
+                    return Ok(None);
+                }
+                let source = match self.primitive_to_string_value(source) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        let Some(kind) = execution_error_kind(&error) else {
+                            return Err(error);
+                        };
+                        let reason = self.create_native_error(kind, None)?;
+                        self.settle_promise(promise, PromiseState::Rejected, reason)?;
+                        return Ok(None);
+                    }
+                };
+                let specifier = self.string_value_to_utf16(source)?;
+                self.enqueue_dynamic_import_with_promise(
+                    &specifier,
+                    self.fiber.entry_module,
+                    &[],
+                    promise,
+                )?;
             }
             Opcode::Yield => {
                 self.suspend_generator_yield(crate::generator::GeneratorSuspendSite {
@@ -8979,6 +9022,25 @@ impl Isolate {
                 }
             };
             if let Err(error) = result {
+                if matches!(
+                    continuation.kind(),
+                    NativeContinuationKind::Conversion {
+                        consumer: ConversionConsumer::DynamicImportSource,
+                        ..
+                    }
+                ) {
+                    let reason = match error {
+                        ExecutionError::HostThrown(value) => value,
+                        error => {
+                            let Some(kind) = execution_error_kind(&error) else {
+                                return Err(error);
+                            };
+                            self.create_native_error(kind, None)?
+                        }
+                    };
+                    self.settle_promise(continuation.first(), PromiseState::Rejected, reason)?;
+                    return Ok(None);
+                }
                 if continuation.as_conversion().is_some()
                     && self.iterator_helper_limit_conversion_pending()
                 {
@@ -9295,6 +9357,16 @@ impl Isolate {
                     self.continue_signal_untrack_abrupt(continuation);
                     instruction_offset = site.call_site;
                     continue;
+                }
+                if matches!(
+                    continuation.kind(),
+                    NativeContinuationKind::Conversion {
+                        consumer: ConversionConsumer::DynamicImportSource,
+                        ..
+                    }
+                ) {
+                    self.settle_promise(continuation.first(), PromiseState::Rejected, value)?;
+                    return Ok(None);
                 }
                 if continuation.kind() == NativeContinuationKind::GeneratorResume {
                     if self.finish_generator_throw(continuation, value)? {

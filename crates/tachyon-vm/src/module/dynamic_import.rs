@@ -256,6 +256,7 @@ impl Trace for DynamicImportState {
 
 impl Isolate {
     /// Creates the result Promise and queues an owned request without invoking host code.
+    #[cfg(test)]
     pub(crate) fn enqueue_dynamic_import(
         &mut self,
         specifier: &[u16],
@@ -266,6 +267,17 @@ impl Isolate {
             PromiseState::Pending,
             Value::from_immediate(tachyon_value::Immediate::Undefined),
         )?;
+        self.enqueue_dynamic_import_with_promise(specifier, referrer, attributes, promise)
+    }
+
+    /// Enqueues a dynamic import using a Promise created before observable conversion work.
+    pub(crate) fn enqueue_dynamic_import_with_promise(
+        &mut self,
+        specifier: &[u16],
+        referrer: Option<ModuleId>,
+        attributes: &[DynamicImportAttribute],
+        promise: Value,
+    ) -> Result<(DynamicImportRequestId, Value), ExecutionError> {
         let id = self
             .module_graph
             .dynamic_imports
