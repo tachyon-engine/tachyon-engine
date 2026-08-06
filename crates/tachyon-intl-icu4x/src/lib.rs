@@ -8,6 +8,7 @@
 //! ICU4X-backed locale-data provider for Tachyon's executor-neutral Intl boundary.
 
 mod collator;
+mod number_format;
 mod supported_values;
 
 use icu_locale::{
@@ -16,8 +17,8 @@ use icu_locale::{
     extensions::unicode::{Key, Value},
 };
 use tachyon_vm::{
-    HostProviderError, IntlCollatorCreation, IntlCollatorRequest, IntlLocaleMatcher, IntlProvider,
-    IntlSupportedValuesKey,
+    HostProviderError, IntlCollatorCreation, IntlCollatorRequest, IntlLocaleMatcher,
+    IntlNumberFormatCreation, IntlNumberFormatRequest, IntlProvider, IntlSupportedValuesKey,
 };
 
 /// Extension aliases required by UTS 35 but absent from ICU4X 2.0's locale canonicalizer.
@@ -119,6 +120,21 @@ impl IntlProvider for Icu4xIntlProvider {
         matcher: IntlLocaleMatcher,
     ) -> Result<Box<[Box<str>]>, HostProviderError> {
         Ok(collator::supported_locales(locales, matcher))
+    }
+
+    fn create_number_format(
+        &mut self,
+        request: IntlNumberFormatRequest,
+    ) -> Result<IntlNumberFormatCreation, HostProviderError> {
+        number_format::create(self.default_locale.as_ref(), request)
+    }
+
+    fn number_format_supported_locales(
+        &mut self,
+        locales: &[Box<str>],
+        matcher: IntlLocaleMatcher,
+    ) -> Result<Box<[Box<str>]>, HostProviderError> {
+        Ok(number_format::supported_locales(locales, matcher))
     }
 }
 

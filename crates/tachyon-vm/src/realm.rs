@@ -4147,6 +4147,84 @@ impl Isolate {
             supported_locales,
             true,
         )?;
+
+        let number_format_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        self.realm.intl_number_format_prototype = Some(number_format_prototype);
+        let number_format_constructor = self.allocate_native_function(
+            NativeFunction::IntlNumberFormatConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.intl_number_format_constructor = Some(number_format_constructor);
+        self.set_function_prototype(number_format_constructor, number_format_prototype)?;
+        self.set_intrinsic_data_property(
+            number_format_prototype,
+            constructor_atom,
+            number_format_constructor,
+            true,
+        )?;
+        let number_format_atom = self.intern_intrinsic_name(b"NumberFormat")?;
+        self.set_intrinsic_data_property(
+            object,
+            number_format_atom,
+            number_format_constructor,
+            true,
+        )?;
+        self.install_collection_accessor(
+            number_format_prototype,
+            function_prototype,
+            b"format",
+            NativeFunction::IntlNumberFormatFormatGetter,
+        )?;
+        let format = self.allocate_native_function(
+            NativeFunction::IntlNumberFormatFormat,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.intl_number_format_format = Some(format);
+        let number_resolved_options = self.allocate_native_function(
+            NativeFunction::IntlNumberFormatResolvedOptions,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.set_intrinsic_data_property(
+            number_format_prototype,
+            resolved_options_atom,
+            number_resolved_options,
+            true,
+        )?;
+        let number_supported_locales = self.allocate_native_function(
+            NativeFunction::IntlNumberFormatSupportedLocalesOf,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.set_intrinsic_data_property(
+            number_format_constructor,
+            supported_locales_atom,
+            number_supported_locales,
+            true,
+        )?;
         let tag_symbol = self
             .agent
             .well_known_symbols
@@ -4160,6 +4238,18 @@ impl Isolate {
             tag_key,
             DataPropertyDescriptor {
                 value: Some(tag_value),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+        let number_format_tag_atom = self.intern_intrinsic_name(b"Intl.NumberFormat")?;
+        let number_format_tag = self.atom_string_value(number_format_tag_atom)?;
+        self.define_data_property(
+            number_format_prototype,
+            tag_key,
+            DataPropertyDescriptor {
+                value: Some(number_format_tag),
                 writable: Some(false),
                 enumerable: Some(false),
                 configurable: Some(true),

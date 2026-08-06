@@ -783,6 +783,11 @@ pub(crate) enum NativeFunction {
     IntlCollatorCompare,
     IntlCollatorResolvedOptions,
     IntlCollatorSupportedLocalesOf,
+    IntlNumberFormatConstructor,
+    IntlNumberFormatFormatGetter,
+    IntlNumberFormatFormat,
+    IntlNumberFormatResolvedOptions,
+    IntlNumberFormatSupportedLocalesOf,
     JsonParse,
     JsonStringify,
     MathAbs,
@@ -1150,6 +1155,7 @@ impl NativeFunction {
                 | Self::FinalizationRegistryConstructor
                 | Self::IntlLocaleConstructor
                 | Self::IntlCollatorConstructor
+                | Self::IntlNumberFormatConstructor
         )
     }
 
@@ -1582,15 +1588,19 @@ impl NativeFunction {
             Self::IntlLocaleConstructor
             | Self::IntlGetCanonicalLocales
             | Self::IntlSupportedValuesOf
-            | Self::IntlCollatorSupportedLocalesOf => 1,
+            | Self::IntlCollatorSupportedLocalesOf
+            | Self::IntlNumberFormatSupportedLocalesOf => 1,
             Self::IntlLocaleToString
             | Self::IntlLocaleCalendar
             | Self::IntlLocaleCollation
             | Self::IntlLocaleNumberingSystem
             | Self::IntlCollatorCompareGetter
             | Self::IntlCollatorResolvedOptions
-            | Self::IntlCollatorConstructor => 0,
-            Self::IntlCollatorCompare => 2,
+            | Self::IntlCollatorConstructor
+            | Self::IntlNumberFormatFormatGetter
+            | Self::IntlNumberFormatResolvedOptions
+            | Self::IntlNumberFormatConstructor => 0,
+            Self::IntlCollatorCompare | Self::IntlNumberFormatFormat => 1,
             Self::JsonParse => 2,
             Self::JsonStringify => 3,
             Self::HostCreateRealm => 0,
@@ -2018,6 +2028,11 @@ impl NativeFunction {
             Self::IntlCollatorCompare => "",
             Self::IntlCollatorResolvedOptions => "resolvedOptions",
             Self::IntlCollatorSupportedLocalesOf => "supportedLocalesOf",
+            Self::IntlNumberFormatConstructor => "NumberFormat",
+            Self::IntlNumberFormatFormatGetter => "get format",
+            Self::IntlNumberFormatFormat => "",
+            Self::IntlNumberFormatResolvedOptions => "resolvedOptions",
+            Self::IntlNumberFormatSupportedLocalesOf => "supportedLocalesOf",
             Self::JsonParse => "parse",
             Self::JsonStringify => "stringify",
             Self::HostCreateRealm => "createRealm",
@@ -2346,6 +2361,7 @@ pub(crate) enum ObjectReceiver {
     Error(GcRef<ErrorObject>),
     Date(GcRef<DateObject>),
     IntlCollator(GcRef<IntlCollatorObject>),
+    IntlNumberFormat(GcRef<IntlNumberFormatObject>),
     Number(GcRef<NumberObject>),
     BigInt(GcRef<BigIntObject>),
     Boolean(GcRef<BooleanObject>),
@@ -2386,6 +2402,7 @@ impl ObjectReceiver {
             Self::Error(error) => Value::from_heap_ref(error.raw()),
             Self::Date(date) => Value::from_heap_ref(date.raw()),
             Self::IntlCollator(collator) => Value::from_heap_ref(collator.raw()),
+            Self::IntlNumberFormat(number_format) => Value::from_heap_ref(number_format.raw()),
             Self::Number(number) => Value::from_heap_ref(number.raw()),
             Self::BigInt(bigint) => Value::from_heap_ref(bigint.raw()),
             Self::Boolean(boolean) => Value::from_heap_ref(boolean.raw()),
@@ -2619,6 +2636,8 @@ pub(crate) struct VmTypes {
     pub(crate) intl_collator_backend: GcType<IntlCollatorBackendPayload>,
     pub(crate) intl_collator_object: GcType<IntlCollatorObject>,
     pub(crate) pending_intl_collator: GcType<PendingIntlCollator>,
+    pub(crate) intl_number_format_payload: GcType<IntlNumberFormatPayload>,
+    pub(crate) intl_number_format_object: GcType<IntlNumberFormatObject>,
     pub(crate) proxy_object: GcType<ProxyObject>,
     pub(crate) number_object: GcType<NumberObject>,
     pub(crate) bigint_object: GcType<BigIntObject>,
@@ -2792,6 +2811,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidJsonCircularStructure
         | ExecutionError::InvalidLocaleListElement(_)
         | ExecutionError::IncompatibleIntlCollatorReceiver(_)
+        | ExecutionError::IncompatibleIntlNumberFormatReceiver(_)
         | ExecutionError::TypedArraySpeciesResultTooShort
         | ExecutionError::DetachedArrayBuffer
         | ExecutionError::FixedLengthSharedArrayBuffer

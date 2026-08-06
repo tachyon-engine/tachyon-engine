@@ -449,6 +449,14 @@ impl Isolate {
                     |object| &mut object.ordinary,
                 )?;
             }
+            ObjectReceiver::IntlNumberFormat(number_format) => {
+                self.set_embedded_object_prototype(
+                    number_format,
+                    self.types.intl_number_format_object,
+                    prototype,
+                    |object| &mut object.ordinary,
+                )?;
+            }
             _ => return Err(ExecutionError::UnsupportedAccessorDescriptor),
         }
         Ok(true)
@@ -1207,6 +1215,21 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::IntlCollator(collator), ordinary));
         }
+        if let Ok(number_format) = self
+            .heap
+            .checked_reference(raw, self.types.intl_number_format_object)
+        {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let number_format = scope.root(number_format).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(number_format, self.types.intl_number_format_object)
+                        .map(|number_format| number_format.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::IntlNumberFormat(number_format), ordinary));
+        }
         if let Ok(number) = self.heap.checked_reference(raw, self.types.number_object) {
             let ordinary = self.heap.with_running_scope(|scope| {
                 let local = scope.root(number).map_err(ExecutionError::Root)?;
@@ -1608,6 +1631,12 @@ impl Isolate {
                 extensible,
                 |object| &mut object.ordinary,
             ),
+            ObjectReceiver::IntlNumberFormat(number_format) => self.set_embedded_object_extensible(
+                number_format,
+                self.types.intl_number_format_object,
+                extensible,
+                |object| &mut object.ordinary,
+            ),
             ObjectReceiver::Number(number) => self.heap.with_running_scope(|scope| {
                 let number = scope.root(number).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -1979,6 +2008,12 @@ impl Isolate {
             ObjectReceiver::IntlCollator(collator) => self.set_embedded_object_shape(
                 collator,
                 self.types.intl_collator_object,
+                shape,
+                |object| &mut object.ordinary,
+            ),
+            ObjectReceiver::IntlNumberFormat(number_format) => self.set_embedded_object_shape(
+                number_format,
+                self.types.intl_number_format_object,
                 shape,
                 |object| &mut object.ordinary,
             ),
@@ -2453,6 +2488,13 @@ impl Isolate {
             ObjectReceiver::IntlCollator(collator) => self.update_embedded_object_storage(
                 collator,
                 self.types.intl_collator_object,
+                shape,
+                storage,
+                |object| &mut object.ordinary,
+            ),
+            ObjectReceiver::IntlNumberFormat(number_format) => self.update_embedded_object_storage(
+                number_format,
+                self.types.intl_number_format_object,
                 shape,
                 storage,
                 |object| &mut object.ordinary,
@@ -2988,6 +3030,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.intl_collator_object)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.intl_number_format_object)
                 .is_ok()
             || self
                 .heap

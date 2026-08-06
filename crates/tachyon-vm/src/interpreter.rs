@@ -2652,6 +2652,7 @@ impl Isolate {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::IntlCollator(_) => (continuation.second(), 0, None, 0),
+            NativeContinuationKind::IntlNumberFormat(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::TypedArrayCallback(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -5427,6 +5428,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::IntlCollatorConstructor) => {
                     return self.begin_intl_collator_constructor(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::IntlNumberFormatConstructor) => {
+                    return self.begin_intl_number_format_constructor(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
                     let object = self.construct_object_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, object);
@@ -7978,6 +7982,21 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::IntlCollatorSupportedLocalesOf) => {
                     return self.begin_intl_collator_supported_locales_of(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::IntlNumberFormatConstructor) => {
+                    return self.begin_intl_number_format_constructor(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlNumberFormatFormatGetter) => {
+                    return self.call_intl_number_format_format_getter(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlNumberFormatFormat) => {
+                    return self.begin_intl_number_format_format(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlNumberFormatResolvedOptions) => {
+                    return self.call_intl_number_format_resolved_options(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlNumberFormatSupportedLocalesOf) => {
+                    return self.begin_intl_number_format_supported_locales_of(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::IntlLocaleConstructor) => {
                     return self.create_intl_locale_from_site(&site);
                 }
@@ -8862,6 +8881,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::IntlCollator(stage) => {
                     self.resume_intl_collator(continuation, stage, value)
+                }
+                NativeContinuationKind::IntlNumberFormat(stage) => {
+                    self.resume_intl_number_format(continuation, stage, value)
                 }
                 NativeContinuationKind::TypedArrayCallback(stage) => {
                     let state = self.native_call_state_reference(continuation.first())?;

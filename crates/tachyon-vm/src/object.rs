@@ -7,7 +7,7 @@ use tachyon_value::{RawHeapRef, Value};
 
 use crate::{
     AtomId, CodeId, IntlCollatorBackend, IntlCollatorCaseFirst, IntlCollatorSensitivity,
-    IntlCollatorUsage, tuning::objects,
+    IntlCollatorUsage, IntlNumberFormatBackend, IntlNumberFormatResolved, tuning::objects,
 };
 use tachyon_bytecode::FunctionId;
 
@@ -695,6 +695,47 @@ impl Trace for IntlCollatorObject {
         self.locale.trace(tracer);
         self.collation.trace(tracer);
         self.cached_bound_compare.trace(tracer);
+    }
+}
+
+/// Provider-owned NumberFormat backend and resolved slots with no managed JavaScript edges.
+pub(crate) struct IntlNumberFormatPayload {
+    pub(crate) backend: Box<dyn IntlNumberFormatBackend>,
+    pub(crate) resolved: IntlNumberFormatResolved,
+}
+
+impl Trace for IntlNumberFormatPayload {
+    #[inline(always)]
+    fn trace(&mut self, _tracer: &mut dyn Tracer) {}
+}
+
+impl GcExternalMemory for IntlNumberFormatPayload {
+    fn external_memory_bytes(&self) -> usize {
+        let options = &self.resolved.options;
+        size_of_val(&*self.backend)
+            .saturating_add(self.backend.external_memory_bytes())
+            .saturating_add(self.resolved.locale.len())
+            .saturating_add(self.resolved.numbering_system.len())
+            .saturating_add(options.currency.as_deref().map_or(0, str::len))
+            .saturating_add(options.unit.as_deref().map_or(0, str::len))
+    }
+}
+
+/// Branded NumberFormat object with a lazily cached bound `format` function.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub(crate) struct IntlNumberFormatObject {
+    pub(crate) ordinary: OrdinaryObject,
+    pub(crate) payload: GcRef<IntlNumberFormatPayload>,
+    pub(crate) cached_bound_format: Value,
+}
+
+impl Trace for IntlNumberFormatObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.ordinary.trace(tracer);
+        self.payload.trace(tracer);
+        self.cached_bound_format.trace(tracer);
     }
 }
 

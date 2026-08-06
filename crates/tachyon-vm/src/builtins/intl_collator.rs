@@ -857,7 +857,10 @@ impl Isolate {
     }
 
     /// Copies the packed intrinsic Array emitted by CanonicalizeLocaleList.
-    fn copy_packed_intl_array(&mut self, value: Value) -> Result<Vec<Value>, ExecutionError> {
+    pub(crate) fn copy_packed_intl_array(
+        &mut self,
+        value: Value,
+    ) -> Result<Vec<Value>, ExecutionError> {
         let raw = value
             .as_heap_ref()
             .ok_or(ExecutionError::MissingNativeContinuation)?;
@@ -889,7 +892,7 @@ impl Isolate {
     }
 
     /// Copies an ECMAScript String whose Collator domain is restricted to ASCII identifiers.
-    fn intl_ascii_string(&mut self, value: Value) -> Result<Box<str>, ExecutionError> {
+    pub(crate) fn intl_ascii_string(&mut self, value: Value) -> Result<Box<str>, ExecutionError> {
         let units = self.string_value_to_utf16(value)?;
         let mut bytes = Vec::new();
         bytes

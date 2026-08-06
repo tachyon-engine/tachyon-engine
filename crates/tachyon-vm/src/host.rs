@@ -258,6 +258,216 @@ pub struct IntlCollatorCreation {
     pub backend: Box<dyn IntlCollatorBackend>,
 }
 
+/// High-level presentation style selected by `Intl.NumberFormat`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlNumberFormatStyle {
+    #[default]
+    Decimal,
+    Percent,
+    Currency,
+    Unit,
+}
+
+/// Currency token presentation selected for currency formatting.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlNumberFormatCurrencyDisplay {
+    Code,
+    #[default]
+    Symbol,
+    NarrowSymbol,
+    Name,
+}
+
+/// Sign convention selected for negative currency values.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlNumberFormatCurrencySign {
+    #[default]
+    Standard,
+    Accounting,
+}
+
+/// Unit name width selected for unit formatting.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlNumberFormatUnitDisplay {
+    #[default]
+    Short,
+    Narrow,
+    Long,
+}
+
+/// Numeric notation selected before digit rounding and localized rendering.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlNumberFormatNotation {
+    #[default]
+    Standard,
+    Scientific,
+    Engineering,
+    Compact,
+}
+
+/// Compact-notation suffix width.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlNumberFormatCompactDisplay {
+    #[default]
+    Short,
+    Long,
+}
+
+/// Locale grouping policy after boolean/string option normalization.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlNumberFormatUseGrouping {
+    Never,
+    Min2,
+    #[default]
+    Auto,
+    Always,
+}
+
+/// Sign visibility selected after applying numeric rounding.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlNumberFormatSignDisplay {
+    #[default]
+    Auto,
+    Never,
+    Always,
+    ExceptZero,
+    Negative,
+}
+
+/// Rounding direction used by FormatNumericToString.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlNumberFormatRoundingMode {
+    Ceil,
+    Floor,
+    Expand,
+    Trunc,
+    HalfCeil,
+    HalfFloor,
+    #[default]
+    HalfExpand,
+    HalfTrunc,
+    HalfEven,
+}
+
+/// Conflict policy when both fraction and significant digit constraints are present.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlNumberFormatRoundingPriority {
+    #[default]
+    Auto,
+    MorePrecision,
+    LessPrecision,
+}
+
+/// Whether an all-zero fractional suffix is retained after rounding.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlNumberFormatTrailingZeroDisplay {
+    #[default]
+    Auto,
+    StripIfInteger,
+}
+
+/// Fully converted NumberFormat option slots with no isolate-local or ICU-specific values.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntlNumberFormatOptions {
+    pub style: IntlNumberFormatStyle,
+    pub currency: Option<Box<str>>,
+    pub currency_display: IntlNumberFormatCurrencyDisplay,
+    pub currency_sign: IntlNumberFormatCurrencySign,
+    pub unit: Option<Box<str>>,
+    pub unit_display: IntlNumberFormatUnitDisplay,
+    pub minimum_integer_digits: u8,
+    pub minimum_fraction_digits: Option<u8>,
+    pub maximum_fraction_digits: Option<u8>,
+    pub minimum_significant_digits: Option<u8>,
+    pub maximum_significant_digits: Option<u8>,
+    pub rounding_increment: u16,
+    pub rounding_mode: IntlNumberFormatRoundingMode,
+    pub rounding_priority: IntlNumberFormatRoundingPriority,
+    pub trailing_zero_display: IntlNumberFormatTrailingZeroDisplay,
+    pub notation: IntlNumberFormatNotation,
+    pub compact_display: IntlNumberFormatCompactDisplay,
+    pub use_grouping: IntlNumberFormatUseGrouping,
+    pub sign_display: IntlNumberFormatSignDisplay,
+}
+
+impl Default for IntlNumberFormatOptions {
+    fn default() -> Self {
+        Self {
+            style: IntlNumberFormatStyle::Decimal,
+            currency: None,
+            currency_display: IntlNumberFormatCurrencyDisplay::Symbol,
+            currency_sign: IntlNumberFormatCurrencySign::Standard,
+            unit: None,
+            unit_display: IntlNumberFormatUnitDisplay::Short,
+            minimum_integer_digits: 1,
+            minimum_fraction_digits: Some(0),
+            maximum_fraction_digits: Some(3),
+            minimum_significant_digits: None,
+            maximum_significant_digits: None,
+            rounding_increment: 1,
+            rounding_mode: IntlNumberFormatRoundingMode::HalfExpand,
+            rounding_priority: IntlNumberFormatRoundingPriority::Auto,
+            trailing_zero_display: IntlNumberFormatTrailingZeroDisplay::Auto,
+            notation: IntlNumberFormatNotation::Standard,
+            compact_display: IntlNumberFormatCompactDisplay::Short,
+            use_grouping: IntlNumberFormatUseGrouping::Auto,
+            sign_display: IntlNumberFormatSignDisplay::Auto,
+        }
+    }
+}
+
+/// NumberFormat locale negotiation plus the already converted option record.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct IntlNumberFormatRequest {
+    pub locales: Box<[Box<str>]>,
+    pub locale_matcher: IntlLocaleMatcher,
+    pub numbering_system: Option<Box<str>>,
+    pub options: IntlNumberFormatOptions,
+}
+
+/// Provider-normalized NumberFormat slots published through `resolvedOptions`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntlNumberFormatResolved {
+    pub locale: Box<str>,
+    pub numbering_system: Box<str>,
+    pub options: IntlNumberFormatOptions,
+}
+
+/// Engine-neutral mathematical input retaining exact decimal spelling for BigInt and strings.
+#[derive(Clone, Debug, PartialEq)]
+pub enum IntlMathematicalValue {
+    Finite(Box<str>),
+    PositiveInfinity,
+    NegativeInfinity,
+    NaN,
+}
+
+/// Opaque compiled number-formatting state retained by a GC external payload.
+pub trait IntlNumberFormatBackend: Send {
+    /// Formats one already converted mathematical value into owned UTF-16 code units.
+    fn format(&self, value: &IntlMathematicalValue) -> Result<Box<[u16]>, HostProviderError>;
+
+    /// Reports only heap backing retained beyond the boxed trait object itself.
+    fn external_memory_bytes(&self) -> usize;
+}
+
+/// One resolved NumberFormat snapshot paired with its reusable compiled backend.
+pub struct IntlNumberFormatCreation {
+    pub resolved: IntlNumberFormatResolved,
+    pub backend: Box<dyn IntlNumberFormatBackend>,
+}
+
 /// Supplies locale data operations without allowing the VM to read process or filesystem state.
 pub trait IntlProvider: Send {
     /// Returns one canonical BCP 47 locale, or `None` when the input is structurally invalid.
@@ -282,6 +492,23 @@ pub trait IntlProvider: Send {
 
     /// Filters canonical requested locales while preserving their original canonical spelling.
     fn collator_supported_locales(
+        &mut self,
+        _locales: &[Box<str>],
+        _matcher: IntlLocaleMatcher,
+    ) -> Result<Box<[Box<str>]>, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+
+    /// Creates reusable provider-owned numeric formatting state from converted inputs.
+    fn create_number_format(
+        &mut self,
+        _request: IntlNumberFormatRequest,
+    ) -> Result<IntlNumberFormatCreation, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+
+    /// Filters canonical requested locales using NumberFormat locale data.
+    fn number_format_supported_locales(
         &mut self,
         _locales: &[Box<str>],
         _matcher: IntlLocaleMatcher,

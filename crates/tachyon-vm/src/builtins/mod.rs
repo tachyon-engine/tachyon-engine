@@ -13,6 +13,7 @@ mod function;
 mod global;
 mod intl;
 mod intl_collator;
+mod intl_number_format;
 mod json;
 mod map_upsert;
 mod math;

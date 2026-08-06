@@ -3,7 +3,7 @@
 use core::mem;
 
 use super::*;
-use crate::{IntlCollatorBackend, driver::DriverActiveWork, module::ModuleGraph};
+use crate::{driver::DriverActiveWork, module::ModuleGraph};
 
 struct CollectionAllocationRoots<'a> {
     vm: VmRoots<'a>,
@@ -46,6 +46,12 @@ struct IntlCollatorAllocationRoots<'a> {
     backend: Option<GcRef<IntlCollatorBackendPayload>>,
 }
 
+struct IntlNumberFormatAllocationRoots<'a> {
+    vm: VmRoots<'a>,
+    prototype: Value,
+    payload: Option<GcRef<IntlNumberFormatPayload>>,
+}
+
 impl Trace for RegExpAllocationRoots<'_> {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
@@ -72,6 +78,15 @@ impl Trace for IntlCollatorAllocationRoots<'_> {
         self.locale.trace(tracer);
         self.collation.trace(tracer);
         self.backend.trace(tracer);
+    }
+}
+
+impl Trace for IntlNumberFormatAllocationRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.prototype.trace(tracer);
+        self.payload.trace(tracer);
     }
 }
 
@@ -156,6 +171,7 @@ impl Isolate {
             IntrinsicPrototypeKind::Boolean => realm.boolean_prototype,
             IntrinsicPrototypeKind::Date => realm.date_prototype,
             IntrinsicPrototypeKind::IntlCollator => realm.intl_collator_prototype,
+            IntrinsicPrototypeKind::IntlNumberFormat => realm.intl_number_format_prototype,
             IntrinsicPrototypeKind::SignalState => realm.signal_state_prototype,
             IntrinsicPrototypeKind::SignalComputed => realm.signal_computed_prototype,
             IntrinsicPrototypeKind::SignalWatcher => realm.signal_watcher_prototype,
@@ -606,6 +622,12 @@ impl Isolate {
                 .map_err(IsolateCreationError::TypeRegistration)?,
             pending_intl_collator: registry
                 .try_register("PendingIntlCollator")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            intl_number_format_payload: registry
+                .try_register("IntlNumberFormatPayload")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            intl_number_format_object: registry
+                .try_register("IntlNumberFormatObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             proxy_object: registry
                 .try_register("ProxyObject")
@@ -1683,6 +1705,63 @@ impl Isolate {
                     case_first: options.case_first,
                     ignore_punctuation: options.ignore_punctuation,
                     numeric: options.numeric,
+                },
+                space,
+                &mut roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Allocates one provider payload and branded NumberFormat wrapper as a rooted unit.
+    pub(crate) fn allocate_intl_number_format_object(
+        &mut self,
+        creation: IntlNumberFormatCreation,
+        prototype: Value,
+        space: AllocationSpace,
+    ) -> Result<Value, ExecutionError> {
+        let mut roots = IntlNumberFormatAllocationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
+                loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
+            },
+            prototype,
+            payload: None,
+        };
+        let payload = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.intl_number_format_payload,
+                0,
+                IntlNumberFormatPayload {
+                    backend: creation.backend,
+                    resolved: creation.resolved,
+                },
+                space,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        roots.payload = Some(payload);
+        self.heap
+            .try_allocate_with_gc(
+                self.types.intl_number_format_object,
+                0,
+                0,
+                IntlNumberFormatObject {
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: roots.prototype,
+                    },
+                    payload,
+                    cached_bound_format: Value::from_immediate(Immediate::Undefined),
                 },
                 space,
                 &mut roots,

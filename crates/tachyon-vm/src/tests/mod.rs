@@ -63,6 +63,7 @@ mod host_agent;
 mod instance_of;
 mod intl;
 mod intl_collator_substrate;
+mod intl_number_format_substrate;
 mod iterator_flat_map;
 mod iterator_intrinsics;
 mod math_conversion;

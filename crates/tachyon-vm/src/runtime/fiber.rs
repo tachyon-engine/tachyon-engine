@@ -1746,6 +1746,13 @@ pub(crate) enum IntlCollatorStage {
     IgnorePunctuation,
 }
 
+/// Observable boundary after NumberFormat locale canonicalization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum IntlNumberFormatStage {
+    Locales,
+}
+
 /// Observable boundaries in the Async-from-Sync iterator algorithms.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1872,6 +1879,7 @@ pub(crate) enum NativeContinuationKind {
     TypedArraySubarray(TypedArraySubarrayStage),
     IntlLocaleList(IntlLocaleListStage),
     IntlCollator(IntlCollatorStage),
+    IntlNumberFormat(IntlNumberFormatStage),
     JsonStringify(JsonStringifyStage),
     JsonParseReviver,
     SignalState(SignalStateStage),
@@ -1913,6 +1921,22 @@ pub(crate) struct NativeContinuation {
 }
 
 impl NativeContinuation {
+    /// Roots NumberFormat constructor state while locale canonicalization executes JavaScript.
+    #[inline]
+    pub(crate) const fn intl_number_format(
+        site: NativeContinuationSite,
+        stage: IntlNumberFormatStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::IntlNumberFormat(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
     /// Roots Collator constructor state while one ordinary option getter executes JavaScript.
     #[inline]
     pub(crate) const fn intl_collator_property_get(
