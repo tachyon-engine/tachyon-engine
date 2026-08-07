@@ -246,6 +246,15 @@ impl Isolate {
         let locales = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        self.begin_intl_get_canonical_locales_value(Self::native_site(site), locales)
+    }
+
+    /// Starts CanonicalizeLocaleList from an already rooted value and continuation site.
+    pub(crate) fn begin_intl_get_canonical_locales_value(
+        &mut self,
+        site: NativeContinuationSite,
+        locales: Value,
+    ) -> Result<(), ExecutionError> {
         let result = self.create_array_object_with_prototype(
             self.realm
                 .array_prototype
@@ -254,11 +263,6 @@ impl Isolate {
         if locales.as_immediate() == Some(Immediate::Undefined) {
             return self.write(site.caller_base, site.destination, result);
         }
-        let site = NativeContinuationSite {
-            caller_base: site.caller_base,
-            destination: site.destination,
-            call_site: site.call_site,
-        };
         if self.is_string_value(locales) || self.intl_locale_reference(locales).is_ok() {
             let state = self.allocate_intl_locale_list_state(locales, result)?;
             self.write(

@@ -497,6 +497,14 @@ impl Isolate {
                     |object| &mut object.ordinary,
                 )?;
             }
+            ObjectReceiver::IntlDisplayNames(display_names) => {
+                self.set_embedded_object_prototype(
+                    display_names,
+                    self.types.intl_display_names_object,
+                    prototype,
+                    |object| &mut object.ordinary,
+                )?;
+            }
             _ => return Err(ExecutionError::UnsupportedAccessorDescriptor),
         }
         Ok(true)
@@ -1338,6 +1346,21 @@ impl Isolate {
                 ordinary,
             ));
         }
+        if let Ok(display_names) = self
+            .heap
+            .checked_reference(raw, self.types.intl_display_names_object)
+        {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let display_names = scope.root(display_names).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(display_names, self.types.intl_display_names_object)
+                        .map(|display_names| display_names.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::IntlDisplayNames(display_names), ordinary));
+        }
         if let Ok(date_time_format) = self
             .heap
             .checked_reference(raw, self.types.intl_date_time_format_object)
@@ -1796,6 +1819,12 @@ impl Isolate {
                     extensible,
                     |object| &mut object.ordinary,
                 ),
+            ObjectReceiver::IntlDisplayNames(display_names) => self.set_embedded_object_extensible(
+                display_names,
+                self.types.intl_display_names_object,
+                extensible,
+                |object| &mut object.ordinary,
+            ),
             ObjectReceiver::Number(number) => self.heap.with_running_scope(|scope| {
                 let number = scope.root(number).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -2207,6 +2236,12 @@ impl Isolate {
                     shape,
                     |object| &mut object.ordinary,
                 ),
+            ObjectReceiver::IntlDisplayNames(display_names) => self.set_embedded_object_shape(
+                display_names,
+                self.types.intl_display_names_object,
+                shape,
+                |object| &mut object.ordinary,
+            ),
             ObjectReceiver::Number(number) => self.heap.with_running_scope(|scope| {
                 let number = scope.root(number).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -2726,6 +2761,13 @@ impl Isolate {
                     storage,
                     |object| &mut object.ordinary,
                 ),
+            ObjectReceiver::IntlDisplayNames(display_names) => self.update_embedded_object_storage(
+                display_names,
+                self.types.intl_display_names_object,
+                shape,
+                storage,
+                |object| &mut object.ordinary,
+            ),
             ObjectReceiver::Number(number) => self.heap.with_running_scope(|scope| {
                 let number = scope.root(number).map_err(ExecutionError::Root)?;
                 let storage_local = storage
@@ -3281,6 +3323,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.intl_relative_time_format_object)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.intl_display_names_object)
                 .is_ok()
             || self
                 .heap

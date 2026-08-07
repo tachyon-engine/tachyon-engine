@@ -64,6 +64,7 @@ mod instance_of;
 mod intl;
 mod intl_collator_substrate;
 mod intl_date_time_format_substrate;
+mod intl_display_names_substrate;
 mod intl_list_format_substrate;
 mod intl_number_format_substrate;
 mod intl_plural_rules_substrate;

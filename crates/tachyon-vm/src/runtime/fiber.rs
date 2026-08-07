@@ -368,6 +368,8 @@ pub(crate) enum ConversionConsumer {
     IntlRelativeTimeFormatStringOption,
     IntlRelativeTimeFormatValue,
     IntlRelativeTimeFormatUnit,
+    IntlDisplayNamesStringOption,
+    IntlDisplayNamesCode,
     IntlDateTimeFormatStringOption,
     IntlDateTimeFormatNumberOption,
     IntlDateTimeFormatValue,
@@ -544,6 +546,8 @@ impl ConversionConsumer {
             | Self::IntlRelativeTimeFormatStringOption
             | Self::IntlRelativeTimeFormatValue
             | Self::IntlRelativeTimeFormatUnit
+            | Self::IntlDisplayNamesStringOption
+            | Self::IntlDisplayNamesCode
             | Self::IntlDateTimeFormatStringOption
             | Self::IntlDateTimeFormatNumberOption
             | Self::IntlDateTimeFormatValue
@@ -709,6 +713,8 @@ impl ConversionConsumer {
                 | Self::IntlNumberFormatStringOption
                 | Self::IntlRelativeTimeFormatStringOption
                 | Self::IntlRelativeTimeFormatUnit
+                | Self::IntlDisplayNamesStringOption
+                | Self::IntlDisplayNamesCode
                 | Self::IntlDateTimeFormatStringOption
                 | Self::IntlCollatorCompareLeft
                 | Self::IntlCollatorCompareRight
@@ -946,6 +952,7 @@ pub(crate) enum PropertyCallbackMode {
     IntlListFormat,
     IntlPluralRules,
     IntlRelativeTimeFormat,
+    IntlDisplayNames,
     CopyDataProperties,
     DefineProperties,
 }
@@ -1854,6 +1861,20 @@ pub(crate) enum IntlRelativeTimeFormatStage {
     FormatToPartsUnit,
 }
 
+/// Observable boundaries in DisplayNames construction and `of` conversion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum IntlDisplayNamesStage {
+    Prototype,
+    Locales,
+    LocaleMatcher,
+    Style,
+    Type,
+    Fallback,
+    LanguageDisplay,
+    Of,
+}
+
 /// Observable boundaries in `Intl.Collator` construction and locale filtering.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -2079,6 +2100,7 @@ pub(crate) enum NativeContinuationKind {
     IntlListFormat(IntlListFormatStage),
     IntlPluralRules(IntlPluralRulesStage),
     IntlRelativeTimeFormat(IntlRelativeTimeFormatStage),
+    IntlDisplayNames(IntlDisplayNamesStage),
     IntlCollator(IntlCollatorStage),
     IntlNumberFormat(IntlNumberFormatStage),
     IntlDateTimeFormat(IntlDateTimeFormatStage),
@@ -2370,6 +2392,37 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::PropertyGet(PropertyCallbackMode::IntlRelativeTimeFormat),
+            first: state,
+            second: options,
+        }
+    }
+
+    /// Roots pending DisplayNames state across locale, option, and code conversions.
+    #[inline]
+    pub(crate) const fn intl_display_names(
+        site: NativeContinuationSite,
+        stage: IntlDisplayNamesStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::IntlDisplayNames(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots pending DisplayNames state while an option getter executes JavaScript.
+    #[inline]
+    pub(crate) const fn intl_display_names_property_get(
+        site: NativeContinuationSite,
+        state: Value,
+        options: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PropertyGet(PropertyCallbackMode::IntlDisplayNames),
             first: state,
             second: options,
         }

@@ -4353,6 +4353,79 @@ impl Isolate {
             },
         )?;
 
+        let display_names_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        self.realm.intl_display_names_prototype = Some(display_names_prototype);
+        let display_names_constructor = self.allocate_native_function(
+            NativeFunction::IntlDisplayNamesConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.intl_display_names_constructor = Some(display_names_constructor);
+        self.set_function_prototype(display_names_constructor, display_names_prototype)?;
+        self.set_intrinsic_data_property(
+            display_names_prototype,
+            constructor_atom,
+            display_names_constructor,
+            true,
+        )?;
+        let display_names_atom = self.intern_intrinsic_name(b"DisplayNames")?;
+        self.set_intrinsic_data_property(
+            object,
+            display_names_atom,
+            display_names_constructor,
+            true,
+        )?;
+        for (name, native) in [
+            (b"of".as_slice(), NativeFunction::IntlDisplayNamesOf),
+            (
+                b"resolvedOptions".as_slice(),
+                NativeFunction::IntlDisplayNamesResolvedOptions,
+            ),
+        ] {
+            self.install_collection_method(
+                display_names_prototype,
+                function_prototype,
+                name,
+                native,
+            )?;
+        }
+        let display_names_supported_locales = self.allocate_native_function(
+            NativeFunction::IntlDisplayNamesSupportedLocalesOf,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.set_intrinsic_data_property(
+            display_names_constructor,
+            supported_locales_atom,
+            display_names_supported_locales,
+            true,
+        )?;
+        let display_names_tag_atom = self.intern_intrinsic_name(b"Intl.DisplayNames")?;
+        let display_names_tag = self.atom_string_value(display_names_tag_atom)?;
+        self.define_data_property(
+            display_names_prototype,
+            to_string_tag,
+            DataPropertyDescriptor {
+                value: Some(display_names_tag),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+
         let collator_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
             shape: ShapeId::EMPTY,
             extensible: true,

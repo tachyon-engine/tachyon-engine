@@ -64,6 +64,12 @@ struct IntlRelativeTimeFormatAllocationRoots<'a> {
     payload: Option<GcRef<IntlRelativeTimeFormatPayload>>,
 }
 
+struct IntlDisplayNamesAllocationRoots<'a> {
+    vm: VmRoots<'a>,
+    prototype: Value,
+    payload: Option<GcRef<IntlDisplayNamesPayload>>,
+}
+
 struct IntlDateTimeFormatAllocationRoots<'a> {
     vm: VmRoots<'a>,
     prototype: Value,
@@ -118,6 +124,15 @@ impl Trace for IntlPluralRulesAllocationRoots<'_> {
 }
 
 impl Trace for IntlRelativeTimeFormatAllocationRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.prototype.trace(tracer);
+        self.payload.trace(tracer);
+    }
+}
+
+impl Trace for IntlDisplayNamesAllocationRoots<'_> {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.vm.trace(tracer);
@@ -224,6 +239,7 @@ impl Isolate {
             IntrinsicPrototypeKind::IntlRelativeTimeFormat => {
                 realm.intl_relative_time_format_prototype
             }
+            IntrinsicPrototypeKind::IntlDisplayNames => realm.intl_display_names_prototype,
             IntrinsicPrototypeKind::SignalState => realm.signal_state_prototype,
             IntrinsicPrototypeKind::SignalComputed => realm.signal_computed_prototype,
             IntrinsicPrototypeKind::SignalWatcher => realm.signal_watcher_prototype,
@@ -705,6 +721,9 @@ impl Isolate {
             pending_intl_relative_time_format: registry
                 .try_register("PendingIntlRelativeTimeFormat")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_intl_display_names: registry
+                .try_register("PendingIntlDisplayNames")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             intl_number_format_payload: registry
                 .try_register("IntlNumberFormatPayload")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -722,6 +741,12 @@ impl Isolate {
                 .map_err(IsolateCreationError::TypeRegistration)?,
             intl_relative_time_format_object: registry
                 .try_register("IntlRelativeTimeFormatObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            intl_display_names_payload: registry
+                .try_register("IntlDisplayNamesPayload")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            intl_display_names_object: registry
+                .try_register("IntlDisplayNamesObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             proxy_object: registry
                 .try_register("ProxyObject")
@@ -1961,6 +1986,62 @@ impl Isolate {
                 0,
                 0,
                 IntlRelativeTimeFormatObject {
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: roots.prototype,
+                    },
+                    payload,
+                },
+                space,
+                &mut roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Allocates one provider payload and branded DisplayNames wrapper as a rooted unit.
+    pub(crate) fn allocate_intl_display_names_object(
+        &mut self,
+        creation: IntlDisplayNamesCreation,
+        prototype: Value,
+        space: AllocationSpace,
+    ) -> Result<Value, ExecutionError> {
+        let mut roots = IntlDisplayNamesAllocationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
+                loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
+            },
+            prototype,
+            payload: None,
+        };
+        let payload = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.intl_display_names_payload,
+                0,
+                IntlDisplayNamesPayload {
+                    backend: creation.backend,
+                    resolved: creation.resolved,
+                },
+                space,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        roots.payload = Some(payload);
+        self.heap
+            .try_allocate_with_gc(
+                self.types.intl_display_names_object,
+                0,
+                0,
+                IntlDisplayNamesObject {
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,

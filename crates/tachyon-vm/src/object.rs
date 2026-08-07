@@ -7,10 +7,11 @@ use tachyon_value::{RawHeapRef, Value};
 
 use crate::{
     AtomId, CodeId, IntlCollatorBackend, IntlCollatorCaseFirst, IntlCollatorSensitivity,
-    IntlCollatorUsage, IntlDateTimeFormatBackend, IntlDateTimeFormatResolved, IntlListFormatStyle,
-    IntlListFormatType, IntlNumberFormatBackend, IntlNumberFormatResolved, IntlPluralCategory,
-    IntlPluralRulesBackend, IntlPluralRulesResolved, IntlRelativeTimeFormatBackend,
-    IntlRelativeTimeFormatResolved, tuning::objects,
+    IntlCollatorUsage, IntlDateTimeFormatBackend, IntlDateTimeFormatResolved,
+    IntlDisplayNamesBackend, IntlDisplayNamesResolved, IntlListFormatStyle, IntlListFormatType,
+    IntlNumberFormatBackend, IntlNumberFormatResolved, IntlPluralCategory, IntlPluralRulesBackend,
+    IntlPluralRulesResolved, IntlRelativeTimeFormatBackend, IntlRelativeTimeFormatResolved,
+    tuning::objects,
 };
 use tachyon_bytecode::FunctionId;
 
@@ -813,6 +814,41 @@ pub(crate) struct IntlRelativeTimeFormatObject {
 }
 
 impl Trace for IntlRelativeTimeFormatObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.ordinary.trace(tracer);
+        self.payload.trace(tracer);
+    }
+}
+
+/// Provider-owned DisplayNames backend and resolved slots without managed edges.
+pub(crate) struct IntlDisplayNamesPayload {
+    pub(crate) backend: Box<dyn IntlDisplayNamesBackend>,
+    pub(crate) resolved: IntlDisplayNamesResolved,
+}
+
+impl Trace for IntlDisplayNamesPayload {
+    #[inline(always)]
+    fn trace(&mut self, _tracer: &mut dyn Tracer) {}
+}
+
+impl GcExternalMemory for IntlDisplayNamesPayload {
+    fn external_memory_bytes(&self) -> usize {
+        size_of_val(&*self.backend)
+            .saturating_add(self.backend.external_memory_bytes())
+            .saturating_add(self.resolved.locale.len())
+    }
+}
+
+/// Branded `Intl.DisplayNames` object retaining ordinary state and provider payload.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub(crate) struct IntlDisplayNamesObject {
+    pub(crate) ordinary: OrdinaryObject,
+    pub(crate) payload: GcRef<IntlDisplayNamesPayload>,
+}
+
+impl Trace for IntlDisplayNamesObject {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.ordinary.trace(tracer);

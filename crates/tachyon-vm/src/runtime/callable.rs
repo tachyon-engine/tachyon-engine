@@ -805,6 +805,10 @@ pub(crate) enum NativeFunction {
     IntlRelativeTimeFormatFormatToParts,
     IntlRelativeTimeFormatResolvedOptions,
     IntlRelativeTimeFormatSupportedLocalesOf,
+    IntlDisplayNamesConstructor,
+    IntlDisplayNamesOf,
+    IntlDisplayNamesResolvedOptions,
+    IntlDisplayNamesSupportedLocalesOf,
     IntlCollatorConstructor,
     IntlCollatorCompareGetter,
     IntlCollatorCompare,
@@ -1193,6 +1197,7 @@ impl NativeFunction {
                 | Self::IntlListFormatConstructor
                 | Self::IntlPluralRulesConstructor
                 | Self::IntlRelativeTimeFormatConstructor
+                | Self::IntlDisplayNamesConstructor
                 | Self::IntlCollatorConstructor
                 | Self::IntlDateTimeFormatConstructor
                 | Self::IntlNumberFormatConstructor
@@ -1634,6 +1639,7 @@ impl NativeFunction {
             Self::IntlListFormatSupportedLocalesOf
             | Self::IntlPluralRulesSupportedLocalesOf
             | Self::IntlRelativeTimeFormatSupportedLocalesOf => 1,
+            Self::IntlDisplayNamesSupportedLocalesOf | Self::IntlDisplayNamesOf => 1,
             Self::IntlLocaleToString
             | Self::IntlLocaleBaseName
             | Self::IntlLocaleLanguage
@@ -1654,6 +1660,7 @@ impl NativeFunction {
             | Self::IntlPluralRulesResolvedOptions
             | Self::IntlRelativeTimeFormatConstructor
             | Self::IntlRelativeTimeFormatResolvedOptions
+            | Self::IntlDisplayNamesResolvedOptions
             | Self::IntlCollatorCompareGetter
             | Self::IntlCollatorResolvedOptions
             | Self::IntlCollatorConstructor
@@ -1672,6 +1679,7 @@ impl NativeFunction {
             | Self::IntlNumberFormatFormat
             | Self::IntlNumberFormatFormatToParts => 1,
             Self::IntlRelativeTimeFormatFormat | Self::IntlRelativeTimeFormatFormatToParts => 2,
+            Self::IntlDisplayNamesConstructor => 2,
             Self::IntlDateTimeFormatFormatRange
             | Self::IntlDateTimeFormatFormatRangeToParts
             | Self::IntlPluralRulesSelectRange => 2,
@@ -2122,6 +2130,10 @@ impl NativeFunction {
             Self::IntlRelativeTimeFormatFormatToParts => "formatToParts",
             Self::IntlRelativeTimeFormatResolvedOptions => "resolvedOptions",
             Self::IntlRelativeTimeFormatSupportedLocalesOf => "supportedLocalesOf",
+            Self::IntlDisplayNamesConstructor => "DisplayNames",
+            Self::IntlDisplayNamesOf => "of",
+            Self::IntlDisplayNamesResolvedOptions => "resolvedOptions",
+            Self::IntlDisplayNamesSupportedLocalesOf => "supportedLocalesOf",
             Self::IntlCollatorConstructor => "Collator",
             Self::IntlCollatorCompareGetter => "get compare",
             Self::IntlCollatorCompare => "",
@@ -2475,6 +2487,7 @@ pub(crate) enum ObjectReceiver {
     IntlNumberFormat(GcRef<IntlNumberFormatObject>),
     IntlPluralRules(GcRef<IntlPluralRulesObject>),
     IntlRelativeTimeFormat(GcRef<IntlRelativeTimeFormatObject>),
+    IntlDisplayNames(GcRef<IntlDisplayNamesObject>),
     Number(GcRef<NumberObject>),
     BigInt(GcRef<BigIntObject>),
     Boolean(GcRef<BooleanObject>),
@@ -2525,6 +2538,7 @@ impl ObjectReceiver {
             Self::IntlRelativeTimeFormat(relative_time_format) => {
                 Value::from_heap_ref(relative_time_format.raw())
             }
+            Self::IntlDisplayNames(display_names) => Value::from_heap_ref(display_names.raw()),
             Self::Number(number) => Value::from_heap_ref(number.raw()),
             Self::BigInt(bigint) => Value::from_heap_ref(bigint.raw()),
             Self::Boolean(boolean) => Value::from_heap_ref(boolean.raw()),
@@ -2768,12 +2782,15 @@ pub(crate) struct VmTypes {
     pub(crate) pending_intl_number_format: GcType<PendingIntlNumberFormat>,
     pub(crate) pending_intl_plural_rules: GcType<PendingIntlPluralRules>,
     pub(crate) pending_intl_relative_time_format: GcType<PendingIntlRelativeTimeFormat>,
+    pub(crate) pending_intl_display_names: GcType<PendingIntlDisplayNames>,
     pub(crate) intl_number_format_payload: GcType<IntlNumberFormatPayload>,
     pub(crate) intl_number_format_object: GcType<IntlNumberFormatObject>,
     pub(crate) intl_plural_rules_payload: GcType<IntlPluralRulesPayload>,
     pub(crate) intl_plural_rules_object: GcType<IntlPluralRulesObject>,
     pub(crate) intl_relative_time_format_payload: GcType<IntlRelativeTimeFormatPayload>,
     pub(crate) intl_relative_time_format_object: GcType<IntlRelativeTimeFormatObject>,
+    pub(crate) intl_display_names_payload: GcType<IntlDisplayNamesPayload>,
+    pub(crate) intl_display_names_object: GcType<IntlDisplayNamesObject>,
     pub(crate) proxy_object: GcType<ProxyObject>,
     pub(crate) number_object: GcType<NumberObject>,
     pub(crate) bigint_object: GcType<BigIntObject>,
@@ -2954,6 +2971,8 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::IncompatibleIntlNumberFormatReceiver(_)
         | ExecutionError::IncompatibleIntlPluralRulesReceiver(_)
         | ExecutionError::IncompatibleIntlRelativeTimeFormatReceiver(_)
+        | ExecutionError::IncompatibleIntlDisplayNamesReceiver(_)
+        | ExecutionError::MissingIntlDisplayNamesType
         | ExecutionError::MissingIntlNumberFormatCurrency
         | ExecutionError::MissingIntlNumberFormatUnit
         | ExecutionError::InvalidIntlNumberFormatRoundingIncrementCombination
@@ -2992,6 +3011,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidIntlNumberFormatOption
         | ExecutionError::InvalidIntlPluralRulesOption
         | ExecutionError::InvalidIntlRelativeTimeFormatOption
+        | ExecutionError::InvalidIntlDisplayNamesOption
         | ExecutionError::InvalidLanguageTag => Some(NativeErrorKind::Range),
         ExecutionError::InvalidUriEncoding => Some(NativeErrorKind::Uri),
         _ => None,

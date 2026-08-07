@@ -737,6 +737,82 @@ pub struct IntlRelativeTimeFormatCreation {
     pub backend: Box<dyn IntlRelativeTimeFormatBackend>,
 }
 
+/// Width selected by `Intl.DisplayNames`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlDisplayNamesStyle {
+    #[default]
+    Long,
+    Short,
+    Narrow,
+}
+
+/// Namespace interpreted by `Intl.DisplayNames.prototype.of`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlDisplayNamesType {
+    Language,
+    Region,
+    Script,
+    Currency,
+    Calendar,
+    DateTimeField,
+}
+
+/// Result used when locale data has no name for a structurally valid code.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlDisplayNamesFallback {
+    #[default]
+    Code,
+    None,
+}
+
+/// Whether language names prefer dialect or standard forms.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlDisplayNamesLanguageDisplay {
+    #[default]
+    Dialect,
+    Standard,
+}
+
+/// Locale negotiation and converted DisplayNames options.
+#[derive(Debug, Eq, PartialEq)]
+pub struct IntlDisplayNamesRequest {
+    pub locales: Box<[Box<str>]>,
+    pub locale_matcher: IntlLocaleMatcher,
+    pub style: IntlDisplayNamesStyle,
+    pub display_type: IntlDisplayNamesType,
+    pub fallback: IntlDisplayNamesFallback,
+    pub language_display: IntlDisplayNamesLanguageDisplay,
+}
+
+/// Resolved scalar slots published by `Intl.DisplayNames.prototype.resolvedOptions`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntlDisplayNamesResolved {
+    pub locale: Box<str>,
+    pub style: IntlDisplayNamesStyle,
+    pub display_type: IntlDisplayNamesType,
+    pub fallback: IntlDisplayNamesFallback,
+    pub language_display: IntlDisplayNamesLanguageDisplay,
+}
+
+/// Opaque locale-data state retained by one branded DisplayNames object.
+pub trait IntlDisplayNamesBackend: Send {
+    /// Returns a localized UTF-16 name, or `None` when the provider has no matching data.
+    fn display_name(&self, code: &str) -> Result<Option<Box<[u16]>>, HostProviderError>;
+
+    /// Reports heap backing retained beyond the boxed trait object itself.
+    fn external_memory_bytes(&self) -> usize;
+}
+
+/// One resolved DisplayNames snapshot paired with reusable provider state.
+pub struct IntlDisplayNamesCreation {
+    pub resolved: IntlDisplayNamesResolved,
+    pub backend: Box<dyn IntlDisplayNamesBackend>,
+}
+
 /// Locale-sensitive width shared by textual date-time fields.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1157,6 +1233,23 @@ pub trait IntlProvider: Send {
 
     /// Filters canonical requests using RelativeTimeFormat locale data availability.
     fn relative_time_format_supported_locales(
+        &mut self,
+        _locales: &[Box<str>],
+        _matcher: IntlLocaleMatcher,
+    ) -> Result<Box<[Box<str>]>, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+
+    /// Creates reusable provider-owned display-name lookup state.
+    fn create_display_names(
+        &mut self,
+        _request: IntlDisplayNamesRequest,
+    ) -> Result<IntlDisplayNamesCreation, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+
+    /// Filters canonical requested locales using DisplayNames data availability.
+    fn display_names_supported_locales(
         &mut self,
         _locales: &[Box<str>],
         _matcher: IntlLocaleMatcher,

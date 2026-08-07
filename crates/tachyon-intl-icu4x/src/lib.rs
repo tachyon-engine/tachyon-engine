@@ -9,6 +9,7 @@
 
 mod collator;
 mod date_time_format;
+mod display_names;
 mod list_format;
 mod number_format;
 mod plural_rules;
@@ -23,9 +24,10 @@ use icu_locale::{
 };
 use tachyon_vm::{
     HostProviderError, IntlCollatorCreation, IntlCollatorRequest, IntlDateTimeFormatCreation,
-    IntlDateTimeFormatRequest, IntlLocaleMatcher, IntlLocaleRequest, IntlNumberFormatCreation,
-    IntlNumberFormatRequest, IntlPluralRulesCreation, IntlPluralRulesRequest, IntlProvider,
-    IntlRelativeTimeFormatCreation, IntlRelativeTimeFormatRequest, IntlSupportedValuesKey,
+    IntlDateTimeFormatRequest, IntlDisplayNamesCreation, IntlDisplayNamesRequest,
+    IntlLocaleMatcher, IntlLocaleRequest, IntlNumberFormatCreation, IntlNumberFormatRequest,
+    IntlPluralRulesCreation, IntlPluralRulesRequest, IntlProvider, IntlRelativeTimeFormatCreation,
+    IntlRelativeTimeFormatRequest, IntlSupportedValuesKey,
 };
 
 /// Extension aliases required by UTS 35 but absent from ICU4X 2.0's locale canonicalizer.
@@ -295,6 +297,21 @@ impl IntlProvider for Icu4xIntlProvider {
         matcher: IntlLocaleMatcher,
     ) -> Result<Box<[Box<str>]>, HostProviderError> {
         Ok(relative_time_format::supported_locales(locales, matcher))
+    }
+
+    fn create_display_names(
+        &mut self,
+        request: IntlDisplayNamesRequest,
+    ) -> Result<IntlDisplayNamesCreation, HostProviderError> {
+        display_names::create(&self.default_locale, request)
+    }
+
+    fn display_names_supported_locales(
+        &mut self,
+        locales: &[Box<str>],
+        matcher: IntlLocaleMatcher,
+    ) -> Result<Box<[Box<str>]>, HostProviderError> {
+        Ok(display_names::supported_locales(locales, matcher))
     }
 
     fn create_date_time_format(

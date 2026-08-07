@@ -2676,6 +2676,7 @@ impl Isolate {
             NativeContinuationKind::IntlRelativeTimeFormat(_) => {
                 (continuation.second(), 0, None, 0)
             }
+            NativeContinuationKind::IntlDisplayNames(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::IntlCollator(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::IntlNumberFormat(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::IntlDateTimeFormat(_) => (continuation.second(), 0, None, 0),
@@ -5516,6 +5517,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::IntlRelativeTimeFormatConstructor) => {
                     return self.begin_intl_relative_time_format_constructor(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::IntlDisplayNamesConstructor) => {
+                    return self.begin_intl_display_names_constructor(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::IntlCollatorConstructor) => {
                     return self.begin_intl_collator_constructor(&site);
                 }
@@ -8112,6 +8116,18 @@ impl Isolate {
                 ) => {
                     return self.call_intl_relative_time_format_resolved_options(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::IntlDisplayNamesConstructor) => {
+                    return self.begin_intl_display_names_constructor(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlDisplayNamesSupportedLocalesOf) => {
+                    return self.begin_intl_display_names_supported_locales_of(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlDisplayNamesOf) => {
+                    return self.begin_intl_display_names_of(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlDisplayNamesResolvedOptions) => {
+                    return self.call_intl_display_names_resolved_options(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::IntlCollatorConstructor) => {
                     return self.begin_intl_collator_constructor(&site);
                 }
@@ -8978,6 +8994,11 @@ impl Isolate {
                             self.pending_intl_relative_time_format_reference(continuation.first())?;
                         let stage = self.pending_intl_relative_time_format_stage(state)?;
                         self.resume_intl_relative_time_format(continuation, stage, value)
+                    } else if mode == PropertyCallbackMode::IntlDisplayNames {
+                        let state =
+                            self.pending_intl_display_names_reference(continuation.first())?;
+                        let stage = self.pending_intl_display_names_stage(state)?;
+                        self.resume_intl_display_names(continuation, stage, value)
                     } else if mode == PropertyCallbackMode::Descriptor {
                         let state =
                             self.pending_property_descriptor_reference(continuation.first())?;
@@ -9117,6 +9138,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::IntlRelativeTimeFormat(stage) => {
                     self.resume_intl_relative_time_format(continuation, stage, value)
+                }
+                NativeContinuationKind::IntlDisplayNames(stage) => {
+                    self.resume_intl_display_names(continuation, stage, value)
                 }
                 NativeContinuationKind::IntlCollator(stage) => {
                     self.resume_intl_collator(continuation, stage, value)

@@ -710,6 +710,24 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::IntlDisplayNamesStringOption {
+                        let state =
+                            self.pending_intl_display_names_reference(continuation.receiver)?;
+                        return self.resume_intl_display_names_option_primitive(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
+                    if continuation.consumer == ConversionConsumer::IntlDisplayNamesCode {
+                        let state =
+                            self.pending_intl_display_names_reference(continuation.receiver)?;
+                        return self.resume_intl_display_names_code(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
                     if matches!(
                         continuation.consumer,
                         ConversionConsumer::IntlDateTimeFormatStringOption
@@ -1795,6 +1813,10 @@ impl Isolate {
                 | ConversionConsumer::IntlRelativeTimeFormatValue
                 | ConversionConsumer::IntlRelativeTimeFormatUnit => {
                     unreachable!("RelativeTimeFormat conversion resumes inside its state machine")
+                }
+                ConversionConsumer::IntlDisplayNamesStringOption
+                | ConversionConsumer::IntlDisplayNamesCode => {
+                    unreachable!("DisplayNames conversion resumes inside its state machine")
                 }
                 ConversionConsumer::IntlDateTimeFormatValue => {
                     unreachable!("DateTimeFormat value conversion resumes inside its state machine")

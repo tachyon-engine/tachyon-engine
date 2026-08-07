@@ -109,7 +109,9 @@ pub use host::{
     IntlDateTimeFormatOptions, IntlDateTimeFormatRequest, IntlDateTimeFormatResolved,
     IntlDateTimeHourCycle, IntlDateTimeInput, IntlDateTimeMonthStyle, IntlDateTimeNumericStyle,
     IntlDateTimePartSpan, IntlDateTimePartType, IntlDateTimeRangePartSpan, IntlDateTimeRangeSource,
-    IntlDateTimeStyle, IntlDateTimeTextStyle, IntlDateTimeZoneNameStyle,
+    IntlDateTimeStyle, IntlDateTimeTextStyle, IntlDateTimeZoneNameStyle, IntlDisplayNamesBackend,
+    IntlDisplayNamesCreation, IntlDisplayNamesFallback, IntlDisplayNamesLanguageDisplay,
+    IntlDisplayNamesRequest, IntlDisplayNamesResolved, IntlDisplayNamesStyle, IntlDisplayNamesType,
     IntlFormattedDateTimeParts, IntlFormattedDateTimeRangeParts, IntlFormattedListParts,
     IntlFormattedNumberParts, IntlFormattedRelativeTimeParts, IntlListFormatPartSpan,
     IntlListFormatPartType, IntlListFormatRequest, IntlListFormatResolved, IntlListFormatStyle,
@@ -224,6 +226,7 @@ pub(crate) enum IntrinsicPrototypeKind {
     Date,
     IntlCollator,
     IntlDateTimeFormat,
+    IntlDisplayNames,
     IntlListFormat,
     IntlLocale,
     IntlNumberFormat,
@@ -265,8 +268,9 @@ use builtins::object::PendingGetOwnPropertyDescriptors;
 use builtins::signals::{ComputedSignal, SignalRuntime, StateSignal, WatcherSignal};
 use builtins::{
     PendingDateNumericArguments, PendingIntlCollator, PendingIntlDateTimeFormat,
-    PendingIntlNumberFormat, PendingIntlPluralRules, PendingIntlRelativeTimeFormat,
-    PendingJsonStringify, math_variadic_add, math_variadic_finish, math_variadic_initial,
+    PendingIntlDisplayNames, PendingIntlNumberFormat, PendingIntlPluralRules,
+    PendingIntlRelativeTimeFormat, PendingJsonStringify, math_variadic_add, math_variadic_finish,
+    math_variadic_initial,
 };
 use collection::{
     CollectionInitializerKind, MapObject, OrderedCollection, PendingCollectionForEach,
@@ -295,12 +299,13 @@ use math_sum_precise::ExactSumAccumulator;
 use object::{
     ArgumentsObject, BigIntObject, BooleanObject, DateObject, IntlCollatorBackendPayload,
     IntlCollatorObject, IntlCollatorResolvedOptions, IntlDateTimeFormatObject,
-    IntlDateTimeFormatPayload, IntlListFormatObject, IntlLocaleObject, IntlNumberFormatObject,
-    IntlNumberFormatPayload, IntlPluralRulesObject, IntlPluralRulesPayload,
-    IntlRelativeTimeFormatObject, IntlRelativeTimeFormatPayload, NumberObject, OrdinaryObject,
-    PropertyAttributes, PropertyKey, PropertyKind, PropertyLookup, PropertyStorage, RegExpObject,
-    ShapeId, ShapeTable, SharedArrayBufferBacking, SharedArrayBufferData, StringObject, SymbolId,
-    SymbolObject, SymbolPropertyKey,
+    IntlDateTimeFormatPayload, IntlDisplayNamesObject, IntlDisplayNamesPayload,
+    IntlListFormatObject, IntlLocaleObject, IntlNumberFormatObject, IntlNumberFormatPayload,
+    IntlPluralRulesObject, IntlPluralRulesPayload, IntlRelativeTimeFormatObject,
+    IntlRelativeTimeFormatPayload, NumberObject, OrdinaryObject, PropertyAttributes, PropertyKey,
+    PropertyKind, PropertyLookup, PropertyStorage, RegExpObject, ShapeId, ShapeTable,
+    SharedArrayBufferBacking, SharedArrayBufferData, StringObject, SymbolId, SymbolObject,
+    SymbolPropertyKey,
 };
 use promise_combinator_state::{
     PendingPromiseCombinator, PromiseCombinatorElement, PromiseCombinatorKind,
@@ -602,6 +607,8 @@ pub enum ExecutionError {
     InvalidIntlNumberFormatOption,
     InvalidIntlPluralRulesOption,
     InvalidIntlRelativeTimeFormatOption,
+    InvalidIntlDisplayNamesOption,
+    MissingIntlDisplayNamesType,
     MissingIntlNumberFormatCurrency,
     MissingIntlNumberFormatUnit,
     InvalidIntlNumberFormatRoundingIncrementCombination,
@@ -612,6 +619,7 @@ pub enum ExecutionError {
     IncompatibleIntlNumberFormatReceiver(Value),
     IncompatibleIntlPluralRulesReceiver(Value),
     IncompatibleIntlRelativeTimeFormatReceiver(Value),
+    IncompatibleIntlDisplayNamesReceiver(Value),
     InvalidUriEncoding,
     UnsupportedTypeof(Value),
     InvalidCode(CodeId),
