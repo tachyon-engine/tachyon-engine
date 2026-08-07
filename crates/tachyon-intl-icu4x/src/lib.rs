@@ -261,6 +261,27 @@ mod tests {
     }
 
     #[test]
+    fn rejects_test262_invalid_time_zone_names() {
+        let mut provider = Icu4xIntlProvider::try_new("en-US").unwrap();
+        for invalid in [
+            "",
+            "MEZ",
+            "Pacific Time",
+            "cnsha",
+            "invalid",
+            "Europe/İstanbul",
+            "asıa/baku",
+            "europe/brußels",
+        ] {
+            assert_eq!(
+                provider.canonicalize_time_zone(invalid).unwrap(),
+                None,
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
     fn accepts_pinned_non_iana_and_transform_extension_forms() {
         let cases = [
             ("mo", "ro"),

@@ -416,6 +416,7 @@ pub(super) fn create(
         .find_map(|locale| match_locale(locale))
         .or_else(|| match_locale(default_locale))
         .ok_or(DATA_FAILURE)?;
+    let time_zone = request.time_zone.take().ok_or(DATA_FAILURE)?;
     let extension_calendar = unicode_keyword(&matched.requested, "ca");
     let option_calendar = request
         .calendar
@@ -476,7 +477,7 @@ pub(super) fn create(
         locale: resolved_locale.to_string().into_boxed_str(),
         calendar: calendar.clone(),
         numbering_system: numbering_system.clone(),
-        time_zone: request.time_zone.clone(),
+        time_zone: time_zone.clone(),
         hour_cycle: (request.options.hour.is_some() || request.options.time_style.is_some())
             .then_some(hour_cycle),
         options: request.options.clone(),
@@ -488,7 +489,7 @@ pub(super) fn create(
             numbering_system,
             digits: decimal_data.digits,
             decimal_separator: decimal_data.decimal_separator,
-            time_zone: request.time_zone,
+            time_zone,
             hour_cycle,
             options: request.options,
         }),
@@ -787,7 +788,7 @@ mod tests {
             numbering_system: None,
             hour_cycle: None,
             hour12: None,
-            time_zone: "UTC".into(),
+            time_zone: Some("UTC".into()),
             options,
         }
     }

@@ -64,16 +64,16 @@ impl Isolate {
         legacy_receiver: Value,
         mut request: IntlDateTimeFormatRequest,
     ) -> Result<(), ExecutionError> {
-        let default_time_zone = self
-            .host_providers
-            .time_zone_mut()
-            .ok_or(ExecutionError::MissingTimeZoneProvider)?
-            .default_time_zone_identifier()
-            .map_err(ExecutionError::TimeZoneProvider)?;
-        if request.time_zone.is_empty() {
-            request.time_zone = default_time_zone;
-        }
-        request.time_zone = self.canonicalize_intl_time_zone(&request.time_zone)?;
+        let time_zone = match request.time_zone.take() {
+            Some(time_zone) => time_zone,
+            None => self
+                .host_providers
+                .time_zone_mut()
+                .ok_or(ExecutionError::MissingTimeZoneProvider)?
+                .default_time_zone_identifier()
+                .map_err(ExecutionError::TimeZoneProvider)?,
+        };
+        request.time_zone = Some(self.canonicalize_intl_time_zone(&time_zone)?);
         let creation = self
             .host_providers
             .intl_mut()

@@ -616,7 +616,7 @@ pub struct IntlDateTimeFormatRequest {
     pub numbering_system: Option<Box<str>>,
     pub hour_cycle: Option<IntlDateTimeHourCycle>,
     pub hour12: Option<bool>,
-    pub time_zone: Box<str>,
+    pub time_zone: Option<Box<str>>,
     pub options: IntlDateTimeFormatOptions,
 }
 

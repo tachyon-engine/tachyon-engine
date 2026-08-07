@@ -353,9 +353,7 @@ impl Isolate {
                 .optional_intl_date_time_format_string(snapshot.numbering_system)?,
             hour_cycle: snapshot.hour_cycle,
             hour12: snapshot.hour12,
-            time_zone: self
-                .optional_intl_date_time_format_string(snapshot.time_zone)?
-                .unwrap_or_default(),
+            time_zone: self.optional_intl_date_time_format_string(snapshot.time_zone)?,
             options: snapshot.fields,
         };
         self.finish_intl_date_time_format_constructor(

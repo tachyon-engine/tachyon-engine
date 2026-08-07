@@ -52,6 +52,12 @@ const legacyProxy = new Proxy(legacy, {
   }
 });
 const proxyResolved = Intl.DateTimeFormat.prototype.resolvedOptions.call(legacyProxy);
+let emptyTimeZoneRejected = false;
+try {
+  new Intl.DateTimeFormat("en-US", { timeZone: "" });
+} catch (error) {
+  emptyTimeZoneRejected = error instanceof RangeError;
+}
 resolved.locale === "en-US" && resolved.calendar === "gregory" &&
 resolved.numberingSystem === "latn" && resolved.timeZone === "UTC" &&
 resolved.year === "numeric" && resolved.month === "2-digit" &&
@@ -70,7 +76,7 @@ legacySymbol.description === "IntlLegacyConstructedSymbol" &&
 legacyDescriptor.writable === false && legacyDescriptor.enumerable === false &&
 legacyDescriptor.configurable === false && legacyResolved.year === "numeric" &&
 legacyFormat(0) === "01/01/1970" && proxyResolved.year === "numeric" &&
-seenLegacySymbol === legacySymbol
+seenLegacySymbol === legacySymbol && emptyTimeZoneRejected
 "#;
 
 struct TestDateTimeBackend;
@@ -158,7 +164,9 @@ impl IntlProvider for TestDateTimeProvider {
                     .unwrap_or_else(|| "en-US".into()),
                 calendar: request.calendar.unwrap_or_else(|| "gregory".into()),
                 numbering_system: request.numbering_system.unwrap_or_else(|| "latn".into()),
-                time_zone: request.time_zone,
+                time_zone: request
+                    .time_zone
+                    .expect("VM canonicalizes a DateTimeFormat time zone before provider creation"),
                 hour_cycle: None,
                 options: request.options,
             },
@@ -209,6 +217,28 @@ impl TimeZoneProvider for TestUtcTimeZone {
     }
 }
 
+struct ExplicitOnlyTimeZone;
+
+impl TimeZoneProvider for ExplicitOnlyTimeZone {
+    fn default_time_zone_identifier(&mut self) -> Result<Box<str>, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+
+    fn offset_milliseconds_for_utc(
+        &mut self,
+        _utc_milliseconds: i64,
+    ) -> Result<i64, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+
+    fn utc_milliseconds_for_local(
+        &mut self,
+        _local_milliseconds: i64,
+    ) -> Result<i64, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+}
+
 struct TestWallClock;
 
 impl WallClockProvider for TestWallClock {
@@ -226,6 +256,45 @@ fn date_time_format_surface_survives_dispatch_batches_and_forced_major() {
         assert_date_time_format_batch::<8>(forced_major);
         assert_date_time_format_batch::<16>(forced_major);
     }
+}
+
+#[test]
+/// Proves an explicit time zone does not consult an unavailable default-zone capability.
+fn explicit_time_zone_skips_default_provider_lookup() {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(10_900),
+                SourceName::new("intl-date-time-format-explicit-time-zone"),
+                MediaType::JavaScript,
+                Arc::from(
+                    "new Intl.DateTimeFormat('en-US', { timeZone: 'UTC' }).resolvedOptions().timeZone === 'UTC'",
+                ),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("explicit DateTimeFormat time-zone fixture compiles");
+    let mut isolate = Isolate::new_with_host_providers(
+        date_time_test_config(),
+        HostProviders::new()
+            .with_wall_clock(TestWallClock)
+            .with_time_zone(ExplicitOnlyTimeZone)
+            .with_intl(TestDateTimeProvider),
+    )
+    .expect("explicit DateTimeFormat time-zone isolate initializes");
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 32_768,
+                quantum: 32_768,
+            },
+        )
+        .expect("explicit DateTimeFormat time zone executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "explicit DateTimeFormat time zone returned {outcome:?}"
+    );
 }
 
 /// Executes the provider-backed surface under one dispatch and collection policy.
