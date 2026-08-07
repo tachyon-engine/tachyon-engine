@@ -187,6 +187,7 @@ impl Isolate {
             IntrinsicPrototypeKind::Date => realm.date_prototype,
             IntrinsicPrototypeKind::IntlCollator => realm.intl_collator_prototype,
             IntrinsicPrototypeKind::IntlDateTimeFormat => realm.intl_date_time_format_prototype,
+            IntrinsicPrototypeKind::IntlLocale => realm.intl_locale_prototype,
             IntrinsicPrototypeKind::IntlNumberFormat => realm.intl_number_format_prototype,
             IntrinsicPrototypeKind::SignalState => realm.signal_state_prototype,
             IntrinsicPrototypeKind::SignalComputed => realm.signal_computed_prototype,
@@ -644,6 +645,9 @@ impl Isolate {
                 .map_err(IsolateCreationError::TypeRegistration)?,
             intl_locale_object: registry
                 .try_register("IntlLocaleObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_intl_locale: registry
+                .try_register("PendingIntlLocale")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             pending_intl_date_time_format: registry
                 .try_register("PendingIntlDateTimeFormat")

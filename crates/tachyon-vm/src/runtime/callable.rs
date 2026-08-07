@@ -3,6 +3,7 @@
 use super::super::*;
 use crate::async_function::AsyncFunctionState;
 use crate::async_module::AsyncModuleState;
+use crate::builtins::PendingIntlLocale;
 use crate::builtins::signals::PendingSignalWatcherOperation;
 use crate::builtins::typed_array::PendingTypedArrayConstruction;
 use crate::generator::GeneratorObject;
@@ -2702,6 +2703,7 @@ pub(crate) struct VmTypes {
     pub(crate) intl_date_time_format_payload: GcType<IntlDateTimeFormatPayload>,
     pub(crate) intl_date_time_format_object: GcType<IntlDateTimeFormatObject>,
     pub(crate) intl_locale_object: GcType<IntlLocaleObject>,
+    pub(crate) pending_intl_locale: GcType<PendingIntlLocale>,
     pub(crate) pending_intl_date_time_format: GcType<PendingIntlDateTimeFormat>,
     pub(crate) pending_intl_collator: GcType<PendingIntlCollator>,
     pub(crate) pending_intl_number_format: GcType<PendingIntlNumberFormat>,

@@ -20,7 +20,7 @@ use icu_locale::{
 };
 use tachyon_vm::{
     HostProviderError, IntlCollatorCreation, IntlCollatorRequest, IntlDateTimeFormatCreation,
-    IntlDateTimeFormatRequest, IntlLocaleMatcher, IntlNumberFormatCreation,
+    IntlDateTimeFormatRequest, IntlLocaleMatcher, IntlLocaleRequest, IntlNumberFormatCreation,
     IntlNumberFormatRequest, IntlProvider, IntlSupportedValuesKey,
 };
 
@@ -99,11 +99,92 @@ impl IntlProvider for Icu4xIntlProvider {
         Ok(Some(locale.to_string().into_boxed_str()))
     }
 
+    /// Applies constructor overrides with ICU locale types so extensions remain structurally valid.
+    fn create_locale(
+        &mut self,
+        request: IntlLocaleRequest,
+    ) -> Result<Option<Box<str>>, HostProviderError> {
+        if request.language.is_none()
+            && request.script.is_none()
+            && request.region.is_none()
+            && request.variants.is_none()
+            && request.calendar.is_none()
+            && request.collation.is_none()
+            && request.hour_cycle.is_none()
+            && request.case_first.is_none()
+            && request.numeric.is_none()
+            && request.numbering_system.is_none()
+        {
+            return Ok(Some(request.tag));
+        }
+        let Ok(mut locale) = request.tag.parse::<Locale>() else {
+            return Ok(None);
+        };
+        if let Some(language) = request.language {
+            let Ok(language) = language.parse() else {
+                return Ok(None);
+            };
+            locale.id.language = language;
+        }
+        if let Some(script) = request.script {
+            let Ok(script) = script.parse() else {
+                return Ok(None);
+            };
+            locale.id.script = Some(script);
+        }
+        if let Some(region) = request.region {
+            let Ok(region) = region.parse() else {
+                return Ok(None);
+            };
+            locale.id.region = Some(region);
+        }
+        if let Some(variants) = request.variants {
+            let candidate = format!("und-{variants}");
+            let Ok(id) = candidate.parse::<icu_locale::LanguageIdentifier>() else {
+                return Ok(None);
+            };
+            locale.id.variants = id.variants;
+        }
+        for (key, value) in [
+            ("ca", request.calendar),
+            ("co", request.collation),
+            ("hc", request.hour_cycle),
+            ("kf", request.case_first),
+            ("nu", request.numbering_system),
+        ] {
+            if let Some(value) = value {
+                let (Ok(key), Ok(value)) = (key.parse::<Key>(), value.parse::<Value>()) else {
+                    return Ok(None);
+                };
+                locale.extensions.unicode.keywords.set(key, value);
+            }
+        }
+        if let Some(numeric) = request.numeric {
+            let value = if numeric {
+                Value::default()
+            } else {
+                "false".parse().expect("static Unicode type")
+            };
+            locale
+                .extensions
+                .unicode
+                .keywords
+                .set("kn".parse().expect("static Unicode key"), value);
+        }
+        LocaleCanonicalizer::new_extended().canonicalize(&mut locale);
+        canonicalize_unicode_extension_aliases(&mut locale);
+        canonicalize_transform_extension_aliases(&mut locale);
+        Ok(Some(locale.to_string().into_boxed_str()))
+    }
+
     fn default_locale(&mut self) -> Result<Box<str>, HostProviderError> {
         Ok(self.default_locale.clone())
     }
 
     fn maximize_locale(&mut self, locale: &str) -> Result<Box<str>, HostProviderError> {
+        if locale.eq_ignore_ascii_case("posix") {
+            return Ok("posix".into());
+        }
         let mut locale = locale
             .parse::<Locale>()
             .map_err(|_| HostProviderError::Failure(3))?;
@@ -112,6 +193,9 @@ impl IntlProvider for Icu4xIntlProvider {
     }
 
     fn minimize_locale(&mut self, locale: &str) -> Result<Box<str>, HostProviderError> {
+        if locale.eq_ignore_ascii_case("posix") {
+            return Ok("posix".into());
+        }
         let mut locale = locale
             .parse::<Locale>()
             .map_err(|_| HostProviderError::Failure(3))?;

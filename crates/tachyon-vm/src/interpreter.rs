@@ -2463,6 +2463,7 @@ impl Isolate {
                     PropertyCallbackMode::IntlCollator
                         | PropertyCallbackMode::IntlNumberFormat
                         | PropertyCallbackMode::IntlDateTimeFormat
+                        | PropertyCallbackMode::IntlLocale
                 ) {
                     continuation.second()
                 } else {
@@ -2668,6 +2669,7 @@ impl Isolate {
             NativeContinuationKind::IntlLocaleList(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::IntlLocale(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::IntlCollator(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::IntlNumberFormat(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::IntlDateTimeFormat(_) => (continuation.second(), 0, None, 0),
@@ -5497,7 +5499,7 @@ impl Isolate {
                     return self.begin_date_constructor(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::IntlLocaleConstructor) => {
-                    return self.create_intl_locale_from_site(&site);
+                    return self.begin_intl_locale_constructor(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::IntlCollatorConstructor) => {
                     return self.begin_intl_collator_constructor(&site);
@@ -8108,7 +8110,7 @@ impl Isolate {
                     return self.begin_intl_number_format_supported_locales_of(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::IntlLocaleConstructor) => {
-                    return self.create_intl_locale_from_site(&site);
+                    return self.begin_intl_locale_constructor(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::IntlLocaleToString) => {
                     let value = self.intl_locale_to_string(site.this_value)?;
@@ -8893,6 +8895,10 @@ impl Isolate {
                             self.pending_intl_date_time_format_reference(continuation.first())?;
                         let stage = self.pending_intl_date_time_format_stage(state)?;
                         self.resume_pending_intl_date_time_format(continuation, stage, value)
+                    } else if mode == PropertyCallbackMode::IntlLocale {
+                        let state = self.pending_intl_locale_reference(continuation.first())?;
+                        let stage = self.pending_intl_locale_stage(state)?;
+                        self.resume_pending_intl_locale(continuation, stage, value)
                     } else if mode == PropertyCallbackMode::Descriptor {
                         let state =
                             self.pending_property_descriptor_reference(continuation.first())?;
@@ -9020,6 +9026,9 @@ impl Isolate {
                 NativeContinuationKind::IntlLocaleList(stage) => {
                     let state = self.native_call_state_reference(continuation.first())?;
                     self.resume_intl_locale_list(site, state, stage, value)
+                }
+                NativeContinuationKind::IntlLocale(stage) => {
+                    self.resume_pending_intl_locale(continuation, stage, value)
                 }
                 NativeContinuationKind::IntlCollator(stage) => {
                     self.resume_intl_collator(continuation, stage, value)

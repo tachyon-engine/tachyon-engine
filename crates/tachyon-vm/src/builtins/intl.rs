@@ -110,76 +110,6 @@ impl Isolate {
         Err(ExecutionError::InvalidIntlSupportedValuesKey)
     }
 
-    /// Constructs the initial `Intl.Locale` internal-slot surface used by locale-list consumers.
-    pub(crate) fn create_intl_locale_from_site(
-        &mut self,
-        site: &CallSite,
-    ) -> Result<(), ExecutionError> {
-        if !self.is_object_value(site.new_target) {
-            return Err(ExecutionError::NonConstructor(site.callee));
-        }
-        let tag = self
-            .call_argument(site, 0)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let tag = if let Ok(locale) = self.intl_locale_reference(tag) {
-            self.intl_locale_tag(locale)?
-        } else if self.is_string_value(tag) {
-            tag
-        } else if self.is_object_value(tag) {
-            return Err(ExecutionError::InvalidLocaleListElement(tag));
-        } else {
-            self.primitive_to_string_value(tag)?
-        };
-        let mut canonical = self.canonicalize_intl_locale_text(tag)?;
-        let options = self
-            .call_argument(site, 1)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        if options.as_immediate() != Some(Immediate::Undefined) {
-            let options = self.coerce_to_object(options)?;
-            let mut extensions = Vec::new();
-            extensions
-                .try_reserve_exact(3)
-                .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
-            for (property, key) in [
-                (b"calendar".as_slice(), "ca"),
-                (b"collation".as_slice(), "co"),
-                (b"numberingSystem".as_slice(), "nu"),
-            ] {
-                if let Some(value) = self.intl_locale_option(options, property)? {
-                    extensions.push((key, value));
-                }
-            }
-            if !extensions.is_empty() {
-                let extension_len = extensions
-                    .iter()
-                    .map(|(key, value)| 3 + key.len() + value.len())
-                    .sum::<usize>();
-                let mut combined = String::new();
-                combined
-                    .try_reserve_exact(canonical.len() + 2 + extension_len)
-                    .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
-                combined.push_str(&canonical);
-                combined.push_str("-u");
-                for (key, value) in extensions {
-                    combined.push('-');
-                    combined.push_str(key);
-                    combined.push('-');
-                    combined.push_str(&value);
-                }
-                canonical = self.canonicalize_intl_ascii_tag(&combined)?;
-            }
-        }
-        let value = self.allocate_runtime_string(
-            JsString::try_from_str(&canonical).map_err(ExecutionError::PropertyKeyString)?,
-        )?;
-        let prototype = self
-            .realm
-            .intl_locale_prototype
-            .expect("Intl.Locale prototype initializes before construction");
-        let locale = self.allocate_intl_locale_object(value, prototype, AllocationSpace::Young)?;
-        self.write(site.caller_base, site.destination, locale)
-    }
-
     /// Returns the canonical tag retained by the current minimal `[[InitializedLocale]]` carrier.
     pub(crate) fn intl_locale_to_string(
         &mut self,
@@ -189,7 +119,7 @@ impl Isolate {
         self.intl_locale_tag(locale)
     }
 
-    fn intl_locale_reference(
+    pub(crate) fn intl_locale_reference(
         &self,
         value: Value,
     ) -> Result<GcRef<IntlLocaleObject>, ExecutionError> {
@@ -201,7 +131,7 @@ impl Isolate {
             .map_err(|_| ExecutionError::InvalidLocaleListElement(value))
     }
 
-    fn intl_locale_tag(
+    pub(crate) fn intl_locale_tag(
         &mut self,
         locale: GcRef<IntlLocaleObject>,
     ) -> Result<Value, ExecutionError> {
@@ -308,29 +238,6 @@ impl Isolate {
         self.write(site.caller_base, site.destination, locale)
     }
 
-    /// Reads one initial Locale option and converts the current primitive-only carrier input.
-    fn intl_locale_option(
-        &mut self,
-        options: Value,
-        property: &[u8],
-    ) -> Result<Option<String>, ExecutionError> {
-        let property = self.intern_intrinsic_name(property)?;
-        let value = self
-            .get_data_property(options, property)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        if value.as_immediate() == Some(Immediate::Undefined) {
-            return Ok(None);
-        }
-        let value = if self.is_string_value(value) {
-            value
-        } else if self.is_object_value(value) {
-            return Err(ExecutionError::InvalidLocaleListElement(value));
-        } else {
-            self.primitive_to_string_value(value)?
-        };
-        self.string_value_to_ascii(value).map(Some)
-    }
-
     /// Starts `Intl.getCanonicalLocales`, preserving every observable array-like access.
     pub(crate) fn begin_intl_get_canonical_locales(
         &mut self,
@@ -352,14 +259,19 @@ impl Isolate {
             destination: site.destination,
             call_site: site.call_site,
         };
-        if self.is_string_value(locales) {
+        if self.is_string_value(locales) || self.intl_locale_reference(locales).is_ok() {
             let state = self.allocate_intl_locale_list_state(locales, result)?;
             self.write(
                 site.caller_base,
                 site.destination,
                 Value::from_heap_ref(state.raw()),
             )?;
-            return self.resume_intl_locale_list_element(site, state, locales);
+            let locale = if let Ok(locale) = self.intl_locale_reference(locales) {
+                self.intl_locale_tag(locale)?
+            } else {
+                locales
+            };
+            return self.resume_intl_locale_list_element(site, state, locale);
         }
         let receiver = self.coerce_to_object(locales)?;
         let state = self.allocate_intl_locale_list_state(receiver, result)?;
@@ -465,6 +377,10 @@ impl Isolate {
         if self.is_string_value(value) {
             return self.resume_intl_locale_list_element(site, state, value);
         }
+        if let Ok(locale) = self.intl_locale_reference(value) {
+            let tag = self.intl_locale_tag(locale)?;
+            return self.resume_intl_locale_list_element(site, state, tag);
+        }
         if !self.is_object_value(value) {
             return Err(ExecutionError::InvalidLocaleListElement(value));
         }
@@ -534,7 +450,7 @@ impl Isolate {
         self.canonicalize_intl_ascii_tag(&tag)
     }
 
-    fn string_value_to_ascii(&mut self, value: Value) -> Result<String, ExecutionError> {
+    pub(crate) fn string_value_to_ascii(&mut self, value: Value) -> Result<String, ExecutionError> {
         let units = self.string_value_to_utf16(value)?;
         let mut bytes = Vec::new();
         bytes
@@ -611,6 +527,11 @@ impl Isolate {
             };
             if self.is_string_value(observed) {
                 self.canonicalize_and_append_locale(site, state, observed)?;
+                continue;
+            }
+            if let Ok(locale) = self.intl_locale_reference(observed) {
+                let tag = self.intl_locale_tag(locale)?;
+                self.canonicalize_and_append_locale(site, state, tag)?;
                 continue;
             }
             if self.is_object_value(observed) {

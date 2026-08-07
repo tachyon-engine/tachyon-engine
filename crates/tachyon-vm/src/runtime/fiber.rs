@@ -354,6 +354,8 @@ pub(crate) enum ConversionConsumer {
     DateToJson,
     IntlLocaleListLength,
     IntlLocaleListElement,
+    IntlLocaleTag,
+    IntlLocaleOption,
     IntlSupportedValuesKey,
     IntlCollatorOption,
     IntlNumberFormatStringOption,
@@ -521,6 +523,8 @@ impl ConversionConsumer {
             | Self::DateToJson
             | Self::IntlLocaleListLength
             | Self::IntlLocaleListElement
+            | Self::IntlLocaleTag
+            | Self::IntlLocaleOption
             | Self::IntlSupportedValuesKey
             | Self::IntlCollatorOption
             | Self::IntlNumberFormatStringOption
@@ -683,6 +687,8 @@ impl ConversionConsumer {
                 | Self::DynamicFunctionArgument
                 | Self::DateToPrimitiveString
                 | Self::IntlLocaleListElement
+                | Self::IntlLocaleTag
+                | Self::IntlLocaleOption
                 | Self::IntlSupportedValuesKey
                 | Self::IntlCollatorOption
                 | Self::IntlNumberFormatStringOption
@@ -774,6 +780,8 @@ impl ConversionConsumer {
                 | Self::DateToJson
                 | Self::IntlLocaleListLength
                 | Self::IntlLocaleListElement
+                | Self::IntlLocaleTag
+                | Self::IntlLocaleOption
                 | Self::IntlSupportedValuesKey
                 | Self::IntlCollatorOption
                 | Self::IntlNumberFormatStringOption
@@ -916,6 +924,7 @@ pub(crate) enum PropertyCallbackMode {
     IntlCollator,
     IntlNumberFormat,
     IntlDateTimeFormat,
+    IntlLocale,
     CopyDataProperties,
     DefineProperties,
 }
@@ -1756,6 +1765,22 @@ pub(crate) enum IntlLocaleListStage {
     Get,
 }
 
+/// Observable option boundaries in `Intl.Locale` construction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum IntlLocaleStage {
+    Language,
+    Script,
+    Region,
+    Variants,
+    Calendar,
+    Collation,
+    HourCycle,
+    CaseFirst,
+    Numeric,
+    NumberingSystem,
+}
+
 /// Observable boundaries in `Intl.Collator` construction and locale filtering.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1977,6 +2002,7 @@ pub(crate) enum NativeContinuationKind {
     TypedArraySlice(TypedArraySliceStage),
     TypedArraySubarray(TypedArraySubarrayStage),
     IntlLocaleList(IntlLocaleListStage),
+    IntlLocale(IntlLocaleStage),
     IntlCollator(IntlCollatorStage),
     IntlNumberFormat(IntlNumberFormatStage),
     IntlDateTimeFormat(IntlDateTimeFormatStage),
@@ -2161,6 +2187,37 @@ impl NativeContinuation {
             kind: NativeContinuationKind::IntlLocaleList(stage),
             first: state,
             second: retained,
+        }
+    }
+
+    /// Roots a pending Locale while one option getter or Proxy read executes JavaScript.
+    #[inline]
+    pub(crate) const fn intl_locale(
+        site: NativeContinuationSite,
+        stage: IntlLocaleStage,
+        state: Value,
+        options: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::IntlLocale(stage),
+            first: state,
+            second: options,
+        }
+    }
+
+    /// Roots pending Locale state while one ordinary option getter executes JavaScript.
+    #[inline]
+    pub(crate) const fn intl_locale_property_get(
+        site: NativeContinuationSite,
+        state: Value,
+        options: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PropertyGet(PropertyCallbackMode::IntlLocale),
+            first: state,
+            second: options,
         }
     }
 

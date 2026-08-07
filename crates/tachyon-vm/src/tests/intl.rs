@@ -26,6 +26,42 @@ impl IntlProvider for TestIntlProvider {
         Ok("en-US".into())
     }
 
+    fn create_locale(
+        &mut self,
+        request: IntlLocaleRequest,
+    ) -> Result<Option<Box<str>>, HostProviderError> {
+        let mut extensions = Vec::with_capacity(6);
+        for (key, value) in [
+            ("ca", request.calendar),
+            ("co", request.collation),
+            ("hc", request.hour_cycle),
+            ("kf", request.case_first),
+            ("nu", request.numbering_system),
+        ] {
+            if let Some(value) = value {
+                extensions.push((key, value));
+            }
+        }
+        if let Some(numeric) = request.numeric {
+            extensions.push(("kn", if numeric { "".into() } else { "false".into() }));
+        }
+        if extensions.is_empty() {
+            return Ok(Some(request.tag));
+        }
+        extensions.sort_unstable_by_key(|(key, _)| *key);
+        let mut locale = request.tag.into_string();
+        locale.push_str("-u");
+        for (key, value) in extensions {
+            locale.push('-');
+            locale.push_str(key);
+            if !value.is_empty() {
+                locale.push('-');
+                locale.push_str(&value);
+            }
+        }
+        Ok(Some(locale.into_boxed_str()))
+    }
+
     fn supported_values(
         &mut self,
         key: IntlSupportedValuesKey,
@@ -113,6 +149,35 @@ descriptor.writable && !descriptor.enumerable && descriptor.configurable &&
 invalidRange && symbolType && constructType;
 "#;
 
+const INTL_LOCALE_OPTIONS_SOURCE: &str = r#"
+var order = [];
+function option(name, value) {
+  return { toString() { order.push("toString " + name); return value; } };
+}
+var locale = new Intl.Locale(
+  { toString() { order.push("tag"); return "en"; } },
+  {
+    get language() { order.push("get language"); return option("language", "de"); },
+    get script() { order.push("get script"); return option("script", "Latn"); },
+    get region() { order.push("get region"); return option("region", "DE"); },
+    get variants() { order.push("get variants"); return option("variants", "fonipa"); },
+    get calendar() { order.push("get calendar"); return option("calendar", "gregory"); },
+    get collation() { order.push("get collation"); return option("collation", "emoji"); },
+    get hourCycle() { order.push("get hourCycle"); return option("hourCycle", "h23"); },
+    get caseFirst() { order.push("get caseFirst"); return option("caseFirst", "upper"); },
+    get numeric() { order.push("get numeric"); return { valueOf() { throw new Error("numeric conversion"); } }; },
+    get numberingSystem() { order.push("get numberingSystem"); return option("numberingSystem", "latn"); }
+  }
+);
+order.join(",") === [
+  "tag", "get language", "toString language", "get script", "toString script",
+  "get region", "toString region", "get variants", "toString variants",
+  "get calendar", "toString calendar", "get collation", "toString collation",
+  "get hourCycle", "toString hourCycle", "get caseFirst", "toString caseFirst",
+  "get numeric", "get numberingSystem", "toString numberingSystem"
+].join(",") && locale instanceof Intl.Locale;
+"#;
+
 #[test]
 fn intl_locale_lists_are_stable_for_every_dispatch_batch() {
     assert_intl_batch::<1>(false);
@@ -139,6 +204,20 @@ fn intl_supported_values_are_stable_for_every_dispatch_batch() {
 #[test]
 fn intl_supported_values_survive_forced_major_collection() {
     assert_supported_values_batch::<8>(true);
+}
+
+#[test]
+fn intl_locale_options_are_stable_for_every_dispatch_batch() {
+    assert_intl_locale_options_batch::<1>(false);
+    assert_intl_locale_options_batch::<2>(false);
+    assert_intl_locale_options_batch::<4>(false);
+    assert_intl_locale_options_batch::<8>(false);
+    assert_intl_locale_options_batch::<16>(false);
+}
+
+#[test]
+fn intl_locale_options_survive_forced_major_collection() {
+    assert_intl_locale_options_batch::<8>(true);
 }
 
 #[test]
@@ -301,6 +380,30 @@ fn assert_supported_values_batch<const N: usize>(forced_major: bool) {
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "Intl supported-values batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Executes Locale tag/options callbacks under one dispatch and collection policy.
+fn assert_intl_locale_options_batch<const N: usize>(forced_major: bool) {
+    let module = compile_intl_source(INTL_LOCALE_OPTIONS_SOURCE, 10_300 + N as u32);
+    let mut isolate = intl_test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("Intl.Locale option fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "Intl.Locale batch {N}, forced_major={forced_major} returned {outcome:?}"
     );
 }
 

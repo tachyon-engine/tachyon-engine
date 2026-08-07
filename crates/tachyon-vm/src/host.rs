@@ -811,10 +811,35 @@ pub struct IntlDateTimeFormatCreation {
     pub backend: Box<dyn IntlDateTimeFormatBackend>,
 }
 
+/// Owned, provider-neutral inputs for applying `Intl.Locale` constructor options.
+#[derive(Clone, Debug)]
+pub struct IntlLocaleRequest {
+    pub tag: Box<str>,
+    pub language: Option<Box<str>>,
+    pub script: Option<Box<str>>,
+    pub region: Option<Box<str>>,
+    pub variants: Option<Box<str>>,
+    pub calendar: Option<Box<str>>,
+    pub collation: Option<Box<str>>,
+    pub hour_cycle: Option<Box<str>>,
+    pub case_first: Option<Box<str>>,
+    pub numeric: Option<bool>,
+    pub numbering_system: Option<Box<str>>,
+}
+
 /// Supplies locale data operations without allowing the VM to read process or filesystem state.
 pub trait IntlProvider: Send {
     /// Returns one canonical BCP 47 locale, or `None` when the input is structurally invalid.
     fn canonicalize_locale(&mut self, locale: &str) -> Result<Option<Box<str>>, HostProviderError>;
+
+    /// Applies already-observed Locale options and performs the required final canonicalization.
+    fn create_locale(
+        &mut self,
+        request: IntlLocaleRequest,
+    ) -> Result<Option<Box<str>>, HostProviderError> {
+        let _ = request;
+        Err(HostProviderError::Unavailable)
+    }
 
     /// Returns the provider's canonical default locale.
     fn default_locale(&mut self) -> Result<Box<str>, HostProviderError>;
