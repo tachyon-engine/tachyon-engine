@@ -8117,9 +8117,31 @@ impl Isolate {
                 FunctionExecutable::Native(
                     native @ (NativeFunction::IntlLocaleCalendar
                     | NativeFunction::IntlLocaleCollation
+                    | NativeFunction::IntlLocaleHourCycle
+                    | NativeFunction::IntlLocaleCaseFirst
                     | NativeFunction::IntlLocaleNumberingSystem),
                 ) => {
                     let value = self.intl_locale_extension_value(site.this_value, native)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlLocaleNumeric) => {
+                    let value = self.intl_locale_numeric(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlLocaleMaximize) => {
+                    return self.call_intl_locale_transform(&site, true);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlLocaleMinimize) => {
+                    return self.call_intl_locale_transform(&site, false);
+                }
+                FunctionExecutable::Native(
+                    native @ (NativeFunction::IntlLocaleBaseName
+                    | NativeFunction::IntlLocaleLanguage
+                    | NativeFunction::IntlLocaleScript
+                    | NativeFunction::IntlLocaleRegion
+                    | NativeFunction::IntlLocaleVariants),
+                ) => {
+                    let value = self.intl_locale_base_component(site.this_value, native)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::JsonParse) => {

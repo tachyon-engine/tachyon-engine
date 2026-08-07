@@ -773,9 +773,19 @@ pub(crate) enum NativeFunction {
     FinalizationRegistryUnregister,
     IntlLocaleConstructor,
     IntlLocaleToString,
+    IntlLocaleBaseName,
+    IntlLocaleLanguage,
+    IntlLocaleScript,
+    IntlLocaleRegion,
+    IntlLocaleVariants,
     IntlLocaleCalendar,
     IntlLocaleCollation,
+    IntlLocaleHourCycle,
+    IntlLocaleCaseFirst,
+    IntlLocaleNumeric,
     IntlLocaleNumberingSystem,
+    IntlLocaleMaximize,
+    IntlLocaleMinimize,
     IntlGetCanonicalLocales,
     IntlSupportedValuesOf,
     IntlCollatorConstructor,
@@ -1602,9 +1612,19 @@ impl NativeFunction {
             | Self::IntlDateTimeFormatSupportedLocalesOf
             | Self::IntlNumberFormatSupportedLocalesOf => 1,
             Self::IntlLocaleToString
+            | Self::IntlLocaleBaseName
+            | Self::IntlLocaleLanguage
+            | Self::IntlLocaleScript
+            | Self::IntlLocaleRegion
+            | Self::IntlLocaleVariants
             | Self::IntlLocaleCalendar
             | Self::IntlLocaleCollation
+            | Self::IntlLocaleHourCycle
+            | Self::IntlLocaleCaseFirst
+            | Self::IntlLocaleNumeric
             | Self::IntlLocaleNumberingSystem
+            | Self::IntlLocaleMaximize
+            | Self::IntlLocaleMinimize
             | Self::IntlCollatorCompareGetter
             | Self::IntlCollatorResolvedOptions
             | Self::IntlCollatorConstructor
@@ -2037,9 +2057,19 @@ impl NativeFunction {
             Self::FinalizationRegistryUnregister => "unregister",
             Self::IntlLocaleConstructor => "Locale",
             Self::IntlLocaleToString => "toString",
+            Self::IntlLocaleBaseName => "get baseName",
+            Self::IntlLocaleLanguage => "get language",
+            Self::IntlLocaleScript => "get script",
+            Self::IntlLocaleRegion => "get region",
+            Self::IntlLocaleVariants => "get variants",
             Self::IntlLocaleCalendar => "get calendar",
             Self::IntlLocaleCollation => "get collation",
+            Self::IntlLocaleHourCycle => "get hourCycle",
+            Self::IntlLocaleCaseFirst => "get caseFirst",
+            Self::IntlLocaleNumeric => "get numeric",
             Self::IntlLocaleNumberingSystem => "get numberingSystem",
+            Self::IntlLocaleMaximize => "maximize",
+            Self::IntlLocaleMinimize => "minimize",
             Self::IntlGetCanonicalLocales => "getCanonicalLocales",
             Self::IntlSupportedValuesOf => "supportedValuesOf",
             Self::IntlCollatorConstructor => "Collator",
@@ -2390,6 +2420,7 @@ pub(crate) enum ObjectReceiver {
     Date(GcRef<DateObject>),
     IntlCollator(GcRef<IntlCollatorObject>),
     IntlDateTimeFormat(GcRef<IntlDateTimeFormatObject>),
+    IntlLocale(GcRef<IntlLocaleObject>),
     IntlNumberFormat(GcRef<IntlNumberFormatObject>),
     Number(GcRef<NumberObject>),
     BigInt(GcRef<BigIntObject>),
@@ -2434,6 +2465,7 @@ impl ObjectReceiver {
             Self::IntlDateTimeFormat(date_time_format) => {
                 Value::from_heap_ref(date_time_format.raw())
             }
+            Self::IntlLocale(locale) => Value::from_heap_ref(locale.raw()),
             Self::IntlNumberFormat(number_format) => Value::from_heap_ref(number_format.raw()),
             Self::Number(number) => Value::from_heap_ref(number.raw()),
             Self::BigInt(bigint) => Value::from_heap_ref(bigint.raw()),
@@ -2669,6 +2701,7 @@ pub(crate) struct VmTypes {
     pub(crate) intl_collator_object: GcType<IntlCollatorObject>,
     pub(crate) intl_date_time_format_payload: GcType<IntlDateTimeFormatPayload>,
     pub(crate) intl_date_time_format_object: GcType<IntlDateTimeFormatObject>,
+    pub(crate) intl_locale_object: GcType<IntlLocaleObject>,
     pub(crate) pending_intl_date_time_format: GcType<PendingIntlDateTimeFormat>,
     pub(crate) pending_intl_collator: GcType<PendingIntlCollator>,
     pub(crate) pending_intl_number_format: GcType<PendingIntlNumberFormat>,

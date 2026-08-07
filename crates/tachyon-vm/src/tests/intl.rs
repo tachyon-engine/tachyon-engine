@@ -202,6 +202,30 @@ fn intl_locale_objects_feed_canonical_locale_lists() {
             "new Intl.Locale('und', { numberingSystem: 'latn' }).numberingSystem === 'latn'",
             "Locale numbering-system getter",
         ),
+        (
+            "new Intl.Locale(new Intl.Locale('fr-CA')).toString() === 'fr-CA'",
+            "Locale constructor copies the internal tag",
+        ),
+        (
+            "Object.prototype.toString.call(new Intl.Locale('en')) === '[object Intl.Locale]'",
+            "Locale toStringTag",
+        ),
+        (
+            "(() => { try { Intl.Locale.prototype.toString.call(new String('en')); return false; } catch (error) { return error instanceof TypeError; } })()",
+            "Locale toString rejects String wrappers",
+        ),
+        (
+            "(() => { let get = Object.getOwnPropertyDescriptor(Intl.Locale.prototype, 'calendar').get; try { get.call(new String('en')); return false; } catch (error) { return error instanceof TypeError; } })()",
+            "Locale accessors reject String wrappers",
+        ),
+        (
+            "(() => { let locale = new Intl.Locale('de-Latn-DE-1996-fonipa-u-hc-h23-kf-kn-false'); return locale.baseName === 'de-Latn-DE-1996-fonipa' && locale.language === 'de' && locale.script === 'Latn' && locale.region === 'DE' && locale.variants === '1996-fonipa' && locale.hourCycle === 'h23' && locale.caseFirst === '' && locale.numeric === false; })()",
+            "Locale base and Unicode-key getters",
+        ),
+        (
+            "(() => { let locale = new Intl.Locale('und'); return locale.language === 'und' && locale.script === undefined && locale.region === undefined && locale.variants === undefined && locale.numeric === false; })()",
+            "Locale missing components",
+        ),
     ];
     for (index, (source, label)) in cases.into_iter().enumerate() {
         let module = compile_intl_source(source, 10_100 + index as u32);

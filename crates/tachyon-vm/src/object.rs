@@ -626,6 +626,14 @@ pub(crate) struct StringObject {
     pub(crate) ordinary: OrdinaryObject,
 }
 
+/// Branded `Intl.Locale` object carrying its canonical language tag.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct IntlLocaleObject {
+    pub(crate) locale: Value,
+    pub(crate) ordinary: OrdinaryObject,
+}
+
 /// Ordinary wrapper carrying the specification's optional `[[SymbolData]]` slot.
 ///
 /// `%Symbol.prototype%` is itself a Symbol exotic object with an absent slot, while values
@@ -1017,6 +1025,14 @@ impl Trace for StringObject {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.string_data.trace(tracer);
+        self.ordinary.trace(tracer);
+    }
+}
+
+impl Trace for IntlLocaleObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.locale.trace(tracer);
         self.ordinary.trace(tracer);
     }
 }

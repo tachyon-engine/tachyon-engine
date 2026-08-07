@@ -819,6 +819,18 @@ pub trait IntlProvider: Send {
     /// Returns the provider's canonical default locale.
     fn default_locale(&mut self) -> Result<Box<str>, HostProviderError>;
 
+    /// Adds likely language/script/region subtags while preserving extensions.
+    fn maximize_locale(&mut self, locale: &str) -> Result<Box<str>, HostProviderError> {
+        let _ = locale;
+        Err(HostProviderError::Unavailable)
+    }
+
+    /// Removes redundant likely subtags while preserving extensions.
+    fn minimize_locale(&mut self, locale: &str) -> Result<Box<str>, HostProviderError> {
+        let _ = locale;
+        Err(HostProviderError::Unavailable)
+    }
+
     /// Returns the provider's supported values as owned strings with no borrowed ICU backing.
     fn supported_values(
         &mut self,

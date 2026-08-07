@@ -642,6 +642,9 @@ impl Isolate {
             intl_date_time_format_object: registry
                 .try_register("IntlDateTimeFormatObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            intl_locale_object: registry
+                .try_register("IntlLocaleObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_intl_date_time_format: registry
                 .try_register("PendingIntlDateTimeFormat")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -1925,6 +1928,47 @@ impl Isolate {
                 0,
                 StringObject {
                     string_data,
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype,
+                    },
+                },
+                space,
+                roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)?;
+        self.realm.retain_construction_value(value)
+    }
+
+    /// Allocates one branded Locale while tracing its canonical tag and prototype.
+    pub(crate) fn allocate_intl_locale_object(
+        &mut self,
+        locale: Value,
+        prototype: Value,
+        space: AllocationSpace,
+    ) -> Result<Value, ExecutionError> {
+        debug_assert!(self.is_string_value(locale));
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
+            finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
+            realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
+            loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
+        };
+        let value = self
+            .heap
+            .try_allocate_with_gc(
+                self.types.intl_locale_object,
+                0,
+                0,
+                IntlLocaleObject {
+                    locale,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,

@@ -449,6 +449,14 @@ impl Isolate {
                     |object| &mut object.ordinary,
                 )?;
             }
+            ObjectReceiver::IntlLocale(locale) => {
+                self.set_embedded_object_prototype(
+                    locale,
+                    self.types.intl_locale_object,
+                    prototype,
+                    |object| &mut object.ordinary,
+                )?;
+            }
             ObjectReceiver::IntlDateTimeFormat(date_time_format) => {
                 self.set_embedded_object_prototype(
                     date_time_format,
@@ -1223,6 +1231,21 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::IntlCollator(collator), ordinary));
         }
+        if let Ok(locale) = self
+            .heap
+            .checked_reference(raw, self.types.intl_locale_object)
+        {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let locale = scope.root(locale).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(locale, self.types.intl_locale_object)
+                        .map(|locale| locale.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::IntlLocale(locale), ordinary));
+        }
         if let Ok(number_format) = self
             .heap
             .checked_reference(raw, self.types.intl_number_format_object)
@@ -1658,6 +1681,12 @@ impl Isolate {
                 extensible,
                 |object| &mut object.ordinary,
             ),
+            ObjectReceiver::IntlLocale(locale) => self.set_embedded_object_extensible(
+                locale,
+                self.types.intl_locale_object,
+                extensible,
+                |object| &mut object.ordinary,
+            ),
             ObjectReceiver::IntlDateTimeFormat(date_time_format) => self
                 .set_embedded_object_extensible(
                     date_time_format,
@@ -2042,6 +2071,12 @@ impl Isolate {
             ObjectReceiver::IntlCollator(collator) => self.set_embedded_object_shape(
                 collator,
                 self.types.intl_collator_object,
+                shape,
+                |object| &mut object.ordinary,
+            ),
+            ObjectReceiver::IntlLocale(locale) => self.set_embedded_object_shape(
+                locale,
+                self.types.intl_locale_object,
                 shape,
                 |object| &mut object.ordinary,
             ),
@@ -2528,6 +2563,13 @@ impl Isolate {
             ObjectReceiver::IntlCollator(collator) => self.update_embedded_object_storage(
                 collator,
                 self.types.intl_collator_object,
+                shape,
+                storage,
+                |object| &mut object.ordinary,
+            ),
+            ObjectReceiver::IntlLocale(locale) => self.update_embedded_object_storage(
+                locale,
+                self.types.intl_locale_object,
                 shape,
                 storage,
                 |object| &mut object.ordinary,
@@ -3078,6 +3120,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.intl_collator_object)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.intl_locale_object)
                 .is_ok()
             || self
                 .heap

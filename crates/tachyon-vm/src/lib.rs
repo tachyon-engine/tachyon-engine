@@ -284,10 +284,10 @@ use math_sum_precise::ExactSumAccumulator;
 use object::{
     ArgumentsObject, BigIntObject, BooleanObject, DateObject, IntlCollatorBackendPayload,
     IntlCollatorObject, IntlCollatorResolvedOptions, IntlDateTimeFormatObject,
-    IntlDateTimeFormatPayload, IntlNumberFormatObject, IntlNumberFormatPayload, NumberObject,
-    OrdinaryObject, PropertyAttributes, PropertyKey, PropertyKind, PropertyLookup, PropertyStorage,
-    RegExpObject, ShapeId, ShapeTable, SharedArrayBufferBacking, SharedArrayBufferData,
-    StringObject, SymbolId, SymbolObject, SymbolPropertyKey,
+    IntlDateTimeFormatPayload, IntlLocaleObject, IntlNumberFormatObject, IntlNumberFormatPayload,
+    NumberObject, OrdinaryObject, PropertyAttributes, PropertyKey, PropertyKind, PropertyLookup,
+    PropertyStorage, RegExpObject, ShapeId, ShapeTable, SharedArrayBufferBacking,
+    SharedArrayBufferData, StringObject, SymbolId, SymbolObject, SymbolPropertyKey,
 };
 use promise_combinator_state::{
     PendingPromiseCombinator, PromiseCombinatorElement, PromiseCombinatorKind,

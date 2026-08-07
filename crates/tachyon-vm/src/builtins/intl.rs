@@ -121,14 +121,10 @@ impl Isolate {
         let tag = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let tag = if self.is_string_value(tag) {
+        let tag = if let Ok(locale) = self.intl_locale_reference(tag) {
+            self.intl_locale_tag(locale)?
+        } else if self.is_string_value(tag) {
             tag
-        } else if tag.as_heap_ref().is_some_and(|raw| {
-            self.heap
-                .checked_reference(raw, self.types.string_object)
-                .is_ok()
-        }) {
-            self.string_primitive_value(tag)?
         } else if self.is_object_value(tag) {
             return Err(ExecutionError::InvalidLocaleListElement(tag));
         } else {
@@ -180,7 +176,7 @@ impl Isolate {
             .realm
             .intl_locale_prototype
             .expect("Intl.Locale prototype initializes before construction");
-        let locale = self.allocate_string_object(value, prototype, AllocationSpace::Young)?;
+        let locale = self.allocate_intl_locale_object(value, prototype, AllocationSpace::Young)?;
         self.write(site.caller_base, site.destination, locale)
     }
 
@@ -189,13 +185,35 @@ impl Isolate {
         &mut self,
         receiver: Value,
     ) -> Result<Value, ExecutionError> {
-        let raw = receiver
+        let locale = self.intl_locale_reference(receiver)?;
+        self.intl_locale_tag(locale)
+    }
+
+    fn intl_locale_reference(
+        &self,
+        value: Value,
+    ) -> Result<GcRef<IntlLocaleObject>, ExecutionError> {
+        let raw = value
             .as_heap_ref()
-            .ok_or(ExecutionError::InvalidLocaleListElement(receiver))?;
+            .ok_or(ExecutionError::InvalidLocaleListElement(value))?;
         self.heap
-            .checked_reference(raw, self.types.string_object)
-            .map_err(|_| ExecutionError::InvalidLocaleListElement(receiver))?;
-        self.string_primitive_value(receiver)
+            .checked_reference(raw, self.types.intl_locale_object)
+            .map_err(|_| ExecutionError::InvalidLocaleListElement(value))
+    }
+
+    fn intl_locale_tag(
+        &mut self,
+        locale: GcRef<IntlLocaleObject>,
+    ) -> Result<Value, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let locale = scope.root(locale).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(locale, self.types.intl_locale_object)
+                    .map(|locale| locale.locale)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
     }
 
     /// Returns one canonical Unicode extension value from the temporary Locale tag carrier.
@@ -209,6 +227,8 @@ impl Isolate {
         let key = match native {
             NativeFunction::IntlLocaleCalendar => "ca",
             NativeFunction::IntlLocaleCollation => "co",
+            NativeFunction::IntlLocaleHourCycle => "hc",
+            NativeFunction::IntlLocaleCaseFirst => "kf",
             NativeFunction::IntlLocaleNumberingSystem => "nu",
             _ => unreachable!("only Intl.Locale extension getters enter this path"),
         };
@@ -218,6 +238,74 @@ impl Isolate {
         self.allocate_runtime_string(
             JsString::try_from_str(&value).map_err(ExecutionError::PropertyKeyString)?,
         )
+    }
+
+    /// Returns one base-name component from the canonical internal locale tag.
+    pub(crate) fn intl_locale_base_component(
+        &mut self,
+        receiver: Value,
+        native: NativeFunction,
+    ) -> Result<Value, ExecutionError> {
+        let tag = self.intl_locale_to_string(receiver)?;
+        let tag = self.string_value_to_ascii(tag)?;
+        let components = LocaleBaseComponents::parse(&tag)
+            .ok_or(ExecutionError::InvalidLocaleListElement(receiver))?;
+        let component = match native {
+            NativeFunction::IntlLocaleBaseName => Some(components.base),
+            NativeFunction::IntlLocaleLanguage => Some(components.language),
+            NativeFunction::IntlLocaleScript => components.script,
+            NativeFunction::IntlLocaleRegion => components.region,
+            NativeFunction::IntlLocaleVariants => components.variants,
+            _ => unreachable!("only Intl.Locale base getters enter this path"),
+        };
+        let Some(component) = component else {
+            return Ok(Value::from_immediate(Immediate::Undefined));
+        };
+        self.allocate_runtime_string(
+            JsString::try_from_str(component).map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
+    /// Interprets the Unicode `kn` keyword as the Locale numeric boolean slot.
+    pub(crate) fn intl_locale_numeric(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
+        let tag = self.intl_locale_to_string(receiver)?;
+        let tag = self.string_value_to_ascii(tag)?;
+        let numeric = match intl_unicode_extension_value(&tag, "kn")? {
+            None => false,
+            Some(value) => value != "false",
+        };
+        Ok(boolean_value(numeric))
+    }
+
+    /// Applies provider likely-subtag data and returns a fresh branded Locale object.
+    pub(crate) fn call_intl_locale_transform(
+        &mut self,
+        site: &CallSite,
+        maximize: bool,
+    ) -> Result<(), ExecutionError> {
+        let tag = self.intl_locale_to_string(site.this_value)?;
+        let tag = self.string_value_to_ascii(tag)?;
+        let transformed = {
+            let provider = self
+                .host_providers
+                .intl_mut()
+                .ok_or(ExecutionError::MissingIntlProvider)?;
+            if maximize {
+                provider.maximize_locale(&tag)
+            } else {
+                provider.minimize_locale(&tag)
+            }
+            .map_err(ExecutionError::IntlProvider)?
+        };
+        let tag = self.allocate_runtime_string(
+            JsString::try_from_str(&transformed).map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        let prototype = self
+            .realm
+            .intl_locale_prototype
+            .expect("Intl.Locale prototype initializes before likely-subtag methods");
+        let locale = self.allocate_intl_locale_object(tag, prototype, AllocationSpace::Young)?;
+        self.write(site.caller_base, site.destination, locale)
     }
 
     /// Reads one initial Locale option and converts the current primitive-only carrier input.
@@ -670,7 +758,7 @@ fn intl_unicode_extension_value(
         }
         if token.len() == 2 {
             if current_key == Some(expected) {
-                return Ok((!output.is_empty()).then_some(output));
+                return Ok(Some(output));
             }
             current_key = Some(token);
             output.clear();
@@ -687,7 +775,62 @@ fn intl_unicode_extension_value(
             output.push_str(token);
         }
     }
-    Ok((current_key == Some(expected) && !output.is_empty()).then_some(output))
+    Ok((current_key == Some(expected)).then_some(output))
+}
+
+struct LocaleBaseComponents<'a> {
+    base: &'a str,
+    language: &'a str,
+    script: Option<&'a str>,
+    region: Option<&'a str>,
+    variants: Option<&'a str>,
+}
+
+impl<'a> LocaleBaseComponents<'a> {
+    /// Splits a canonical Unicode locale ID without allocating component strings.
+    fn parse(tag: &'a str) -> Option<Self> {
+        let mut consumed = 0;
+        let mut base_end = tag.len();
+        for segment in tag.split('-') {
+            if consumed != 0 && segment.len() == 1 {
+                base_end = consumed - 1;
+                break;
+            }
+            consumed = consumed.checked_add(segment.len() + 1)?;
+        }
+        let base = tag.get(..base_end)?;
+        let mut segments = base.split('-');
+        let language = segments.next()?;
+        let mut offset = language.len();
+        let mut script = None;
+        let mut region = None;
+        let mut variants_start = None;
+        for segment in segments {
+            offset = offset.checked_add(1)?;
+            let start = offset;
+            offset = offset.checked_add(segment.len())?;
+            if script.is_none()
+                && segment.len() == 4
+                && segment.bytes().all(|byte| byte.is_ascii_alphabetic())
+            {
+                script = Some(segment);
+            } else if region.is_none()
+                && ((segment.len() == 2 && segment.bytes().all(|byte| byte.is_ascii_alphabetic()))
+                    || (segment.len() == 3 && segment.bytes().all(|byte| byte.is_ascii_digit())))
+            {
+                region = Some(segment);
+            } else if variants_start.is_none() {
+                variants_start = Some(start);
+            }
+        }
+        Some(Self {
+            base,
+            language,
+            script,
+            region,
+            variants: variants_start.and_then(|start| base.get(start..)),
+        })
+    }
 }
 
 #[inline(always)]

@@ -4045,14 +4045,47 @@ impl Isolate {
         let to_string_atom = self.intern_intrinsic_name(b"toString")?;
         self.set_intrinsic_data_property(locale_prototype, to_string_atom, locale_to_string, true)?;
         for (name, native) in [
+            (b"baseName".as_slice(), NativeFunction::IntlLocaleBaseName),
+            (b"language".as_slice(), NativeFunction::IntlLocaleLanguage),
+            (b"script".as_slice(), NativeFunction::IntlLocaleScript),
+            (b"region".as_slice(), NativeFunction::IntlLocaleRegion),
+            (b"variants".as_slice(), NativeFunction::IntlLocaleVariants),
             (b"calendar".as_slice(), NativeFunction::IntlLocaleCalendar),
             (b"collation".as_slice(), NativeFunction::IntlLocaleCollation),
+            (b"hourCycle".as_slice(), NativeFunction::IntlLocaleHourCycle),
+            (b"caseFirst".as_slice(), NativeFunction::IntlLocaleCaseFirst),
+            (b"numeric".as_slice(), NativeFunction::IntlLocaleNumeric),
             (
                 b"numberingSystem".as_slice(),
                 NativeFunction::IntlLocaleNumberingSystem,
             ),
         ] {
             self.install_collection_accessor(locale_prototype, function_prototype, name, native)?;
+        }
+        let locale_tag = self.allocate_runtime_string(
+            JsString::try_from_latin1(b"Intl.Locale").map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        let to_string_tag = self
+            .agent
+            .well_known_symbols
+            .to_string_tag
+            .expect("Symbol.toStringTag initializes before Intl.Locale");
+        let to_string_tag = self.property_key(to_string_tag)?;
+        self.define_data_property(
+            locale_prototype,
+            to_string_tag,
+            DataPropertyDescriptor {
+                value: Some(locale_tag),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+        for (name, native) in [
+            (b"maximize".as_slice(), NativeFunction::IntlLocaleMaximize),
+            (b"minimize".as_slice(), NativeFunction::IntlLocaleMinimize),
+        ] {
+            self.install_collection_method(locale_prototype, function_prototype, name, native)?;
         }
         let method = self.allocate_native_function(
             NativeFunction::IntlGetCanonicalLocales,

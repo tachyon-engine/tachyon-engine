@@ -14,7 +14,7 @@ mod supported_values;
 mod tuning;
 
 use icu_locale::{
-    Locale, LocaleCanonicalizer,
+    Locale, LocaleCanonicalizer, LocaleExpander,
     extensions::transform::{Key as TransformKey, Value as TransformValue},
     extensions::unicode::{Key, Value},
 };
@@ -101,6 +101,22 @@ impl IntlProvider for Icu4xIntlProvider {
 
     fn default_locale(&mut self) -> Result<Box<str>, HostProviderError> {
         Ok(self.default_locale.clone())
+    }
+
+    fn maximize_locale(&mut self, locale: &str) -> Result<Box<str>, HostProviderError> {
+        let mut locale = locale
+            .parse::<Locale>()
+            .map_err(|_| HostProviderError::Failure(3))?;
+        LocaleExpander::new_extended().maximize(&mut locale.id);
+        Ok(locale.to_string().into_boxed_str())
+    }
+
+    fn minimize_locale(&mut self, locale: &str) -> Result<Box<str>, HostProviderError> {
+        let mut locale = locale
+            .parse::<Locale>()
+            .map_err(|_| HostProviderError::Failure(3))?;
+        LocaleExpander::new_extended().minimize(&mut locale.id);
+        Ok(locale.to_string().into_boxed_str())
     }
 
     fn supported_values(
@@ -279,6 +295,25 @@ mod tests {
                 "{invalid}"
             );
         }
+    }
+
+    #[test]
+    fn expands_and_minimizes_likely_subtags_without_losing_extensions() {
+        let mut provider = Icu4xIntlProvider::try_new("en-US").unwrap();
+        assert_eq!(
+            provider
+                .maximize_locale("zh-u-ca-chinese")
+                .unwrap()
+                .as_ref(),
+            "zh-Hans-CN-u-ca-chinese"
+        );
+        assert_eq!(
+            provider
+                .minimize_locale("zh-Hans-CN-u-ca-chinese")
+                .unwrap()
+                .as_ref(),
+            "zh-u-ca-chinese"
+        );
     }
 
     #[test]
