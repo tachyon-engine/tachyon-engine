@@ -163,10 +163,15 @@ impl Icu4xDateTimeFormatBackend {
             } else {
                 IntlDateTimeNumericStyle::Numeric
             });
-        let year = if year_style == IntlDateTimeNumericStyle::TwoDigit {
-            civil.year.rem_euclid(100)
+        let era_year = if civil.year <= 0 {
+            1 - civil.year
         } else {
             civil.year
+        };
+        let year = if year_style == IntlDateTimeNumericStyle::TwoDigit {
+            era_year.rem_euclid(100)
+        } else {
+            era_year
         };
         if self.locale.starts_with("en-US") {
             self.push_month(output, civil.month, month_style)?;
@@ -1073,5 +1078,27 @@ mod tests {
             String::from_utf16(&full_time.backend.format(input).unwrap()).unwrap(),
             "12:00:00 AM Coordinated Universal Time"
         );
+    }
+
+    #[test]
+    /// Maps astronomical year zero and negative years onto Gregorian era years before rendering.
+    fn formats_proleptic_gregorian_years_without_year_zero() {
+        let formatter = create(
+            "en-US",
+            request(IntlDateTimeFormatOptions {
+                year: Some(IntlDateTimeNumericStyle::Numeric),
+                era: Some(IntlDateTimeTextStyle::Short),
+                ..IntlDateTimeFormatOptions::default()
+            }),
+        )
+        .unwrap();
+        let formatted = formatter
+            .backend
+            .format(IntlDateTimeInput {
+                utc_milliseconds: -62_167_219_200_000,
+                offset_milliseconds: 0,
+            })
+            .unwrap();
+        assert_eq!(String::from_utf16(&formatted).unwrap(), "1/1/1 BC");
     }
 }
