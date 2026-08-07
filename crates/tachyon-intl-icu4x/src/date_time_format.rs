@@ -1,5 +1,9 @@
 //! ICU4X-locale-backed implementation of Tachyon's provider-neutral DateTimeFormat ABI.
 
+use icu_calendar::{
+    AsCalendar, Date,
+    cal::{Chinese, Dangi, Iso},
+};
 use icu_locale::{
     Locale,
     extensions::unicode::{Key, Value},
@@ -57,6 +61,14 @@ struct CivilDateTime {
     minute: u8,
     second: u8,
     millisecond: u16,
+}
+
+#[derive(Clone, Copy)]
+struct CyclicDateFields {
+    related_year: i32,
+    cyclic_year: u8,
+    month: u8,
+    day: u8,
 }
 
 impl IntlDateTimeFormatBackend for Icu4xDateTimeFormatBackend {
@@ -138,6 +150,9 @@ impl Icu4xDateTimeFormatBackend {
         output: &mut RenderedDateTime,
         civil: CivilDateTime,
     ) -> Result<(), HostProviderError> {
+        if matches!(self.calendar.as_ref(), "chinese" | "dangi") {
+            return self.render_cyclic_date(output, civil);
+        }
         let style = self.options.date_style;
         if self.options.weekday.is_some() || matches!(style, Some(IntlDateTimeStyle::Full)) {
             output.push(
@@ -218,6 +233,129 @@ impl Icu4xDateTimeFormatBackend {
             )?;
         }
         Ok(())
+    }
+
+    /// Converts an ISO civil date through ICU4X and emits cyclic-calendar fields and patterns.
+    fn render_cyclic_date(
+        &self,
+        output: &mut RenderedDateTime,
+        civil: CivilDateTime,
+    ) -> Result<(), HostProviderError> {
+        let iso = Date::try_new_iso(
+            i32::try_from(civil.year).map_err(|_| DATA_FAILURE)?,
+            civil.month,
+            civil.day,
+        )
+        .map_err(|_| DATA_FAILURE)?;
+        let fields = match self.calendar.as_ref() {
+            "chinese" => cyclic_date_fields(&iso, Chinese::new())?,
+            "dangi" => cyclic_date_fields(&iso, Dangi::new())?,
+            _ => return Err(DATA_FAILURE),
+        };
+        if self.locale.starts_with("zh") {
+            self.render_zh_cyclic_date(output, fields)
+        } else {
+            self.render_en_cyclic_date(output, fields)
+        }
+    }
+
+    /// Emits the compact Chinese field order used by CLDR's numeric cyclic-calendar pattern.
+    fn render_zh_cyclic_date(
+        &self,
+        output: &mut RenderedDateTime,
+        fields: CyclicDateFields,
+    ) -> Result<(), HostProviderError> {
+        if let Some(year_style) = self.options.year {
+            output.push_number(
+                IntlDateTimePartType::RelatedYear,
+                i64::from(fields.related_year),
+                year_style,
+                &self.digits,
+            )?;
+            self.push_cyclic_year_name(output, fields.cyclic_year)?;
+            output.push(IntlDateTimePartType::Literal, "年")?;
+        }
+        if let Some(month_style) = self.options.month {
+            output.push_number(
+                IntlDateTimePartType::Month,
+                i64::from(fields.month),
+                month_numeric_style(month_style),
+                &self.digits,
+            )?;
+            output.push(IntlDateTimePartType::Literal, "月")?;
+        }
+        if let Some(day_style) = self.options.day {
+            output.push_number(
+                IntlDateTimePartType::Day,
+                i64::from(fields.day),
+                day_style,
+                &self.digits,
+            )?;
+            output.push(IntlDateTimePartType::Literal, "日")?;
+        }
+        Ok(())
+    }
+
+    /// Emits an English pattern that keeps relatedYear/yearName distinct in typed parts.
+    fn render_en_cyclic_date(
+        &self,
+        output: &mut RenderedDateTime,
+        fields: CyclicDateFields,
+    ) -> Result<(), HostProviderError> {
+        if let Some(month_style) = self.options.month {
+            output.push_number(
+                IntlDateTimePartType::Month,
+                i64::from(fields.month),
+                month_numeric_style(month_style),
+                &self.digits,
+            )?;
+        }
+        if self.options.month.is_some() && self.options.day.is_some() {
+            output.push(IntlDateTimePartType::Literal, "/")?;
+        }
+        if let Some(day_style) = self.options.day {
+            output.push_number(
+                IntlDateTimePartType::Day,
+                i64::from(fields.day),
+                day_style,
+                &self.digits,
+            )?;
+        }
+        if self.options.year.is_some()
+            && (self.options.month.is_some() || self.options.day.is_some())
+        {
+            output.push(IntlDateTimePartType::Literal, "/")?;
+        }
+        if let Some(year_style) = self.options.year {
+            output.push_number(
+                IntlDateTimePartType::RelatedYear,
+                i64::from(fields.related_year),
+                year_style,
+                &self.digits,
+            )?;
+            output.push(IntlDateTimePartType::Literal, " (")?;
+            self.push_cyclic_year_name(output, fields.cyclic_year)?;
+            output.push(IntlDateTimePartType::Literal, ")")?;
+        }
+        Ok(())
+    }
+
+    /// Emits one sexagenary year name without allocating an intermediate String.
+    fn push_cyclic_year_name(
+        &self,
+        output: &mut RenderedDateTime,
+        cyclic_year: u8,
+    ) -> Result<(), HostProviderError> {
+        const STEMS: [&str; 10] = ["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸"];
+        const BRANCHES: [&str; 12] = [
+            "子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥",
+        ];
+        let index = usize::from(cyclic_year.checked_sub(1).ok_or(DATA_FAILURE)?);
+        output.push_pair(
+            IntlDateTimePartType::YearName,
+            STEMS[index % STEMS.len()],
+            BRANCHES[index % BRANCHES.len()],
+        )
     }
 
     /// Emits hour-cycle-aware time fields without consulting process locale or time zone state.
@@ -369,6 +507,23 @@ impl RenderedDateTime {
     fn push(&mut self, kind: IntlDateTimePartType, text: &str) -> Result<(), HostProviderError> {
         let start = u32::try_from(self.formatted.len()).map_err(|_| DATA_FAILURE)?;
         self.formatted.extend(text.encode_utf16());
+        let end = u32::try_from(self.formatted.len()).map_err(|_| DATA_FAILURE)?;
+        if let Some(spans) = &mut self.spans {
+            spans.push(IntlDateTimePartSpan { kind, start, end });
+        }
+        Ok(())
+    }
+
+    /// Appends two static fragments as one semantic field and therefore one parts span.
+    fn push_pair(
+        &mut self,
+        kind: IntlDateTimePartType,
+        first: &str,
+        second: &str,
+    ) -> Result<(), HostProviderError> {
+        let start = u32::try_from(self.formatted.len()).map_err(|_| DATA_FAILURE)?;
+        self.formatted.extend(first.encode_utf16());
+        self.formatted.extend(second.encode_utf16());
         let end = u32::try_from(self.formatted.len()).map_err(|_| DATA_FAILURE)?;
         if let Some(spans) = &mut self.spans {
             spans.push(IntlDateTimePartSpan { kind, start, end });
@@ -661,6 +816,29 @@ fn civil_from_days(days: i64) -> (i64, u8, u8) {
         u8::try_from(month).expect("civil month is within 1..13"),
         u8::try_from(day).expect("civil day is within 1..32"),
     )
+}
+
+/// Extracts the provider-neutral fields shared by Chinese and Dangi calendar patterns.
+fn cyclic_date_fields<A: AsCalendar>(
+    iso: &Date<Iso>,
+    calendar: A,
+) -> Result<CyclicDateFields, HostProviderError> {
+    let date = iso.to_calendar(calendar);
+    let cyclic = date.year().cyclic().ok_or(DATA_FAILURE)?;
+    Ok(CyclicDateFields {
+        related_year: cyclic.related_iso,
+        cyclic_year: cyclic.year,
+        month: date.month().month_number(),
+        day: date.day_of_month().0,
+    })
+}
+
+#[inline(always)]
+const fn month_numeric_style(style: IntlDateTimeMonthStyle) -> IntlDateTimeNumericStyle {
+    match style {
+        IntlDateTimeMonthStyle::TwoDigit => IntlDateTimeNumericStyle::TwoDigit,
+        _ => IntlDateTimeNumericStyle::Numeric,
+    }
 }
 
 fn displayed_hour(hour: u8, cycle: IntlDateTimeHourCycle) -> u8 {
@@ -1100,5 +1278,101 @@ mod tests {
             })
             .unwrap();
         assert_eq!(String::from_utf16(&formatted).unwrap(), "1/1/1 BC");
+    }
+
+    #[test]
+    /// Converts Chinese and Dangi dates into related-year, cyclic-year, month, and day fields.
+    fn formats_compiled_cyclic_calendar_data() {
+        let chinese = create(
+            "en-US",
+            request_for("en-US-u-ca-chinese", Default::default()),
+        )
+        .unwrap();
+        let parts = chinese
+            .backend
+            .format_to_parts(IntlDateTimeInput {
+                utc_milliseconds: 946_684_800_000,
+                offset_milliseconds: 0,
+            })
+            .unwrap();
+        let values = parts
+            .spans
+            .iter()
+            .map(|span| {
+                (
+                    span.kind,
+                    String::from_utf16(&parts.formatted[span.start as usize..span.end as usize])
+                        .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            values.contains(&(IntlDateTimePartType::RelatedYear, "1999".into())),
+            "unexpected Chinese fields: {values:?}"
+        );
+        assert!(
+            values.contains(&(IntlDateTimePartType::Month, "11".into())),
+            "unexpected Chinese fields: {values:?}"
+        );
+        assert!(
+            values.contains(&(IntlDateTimePartType::Day, "25".into())),
+            "unexpected Chinese fields: {values:?}"
+        );
+        assert!(
+            values
+                .iter()
+                .any(|(kind, _)| *kind == IntlDateTimePartType::YearName)
+        );
+        for (milliseconds, expected) in [
+            (-2_208_988_800_000, "12/1/1899"),
+            (4_102_444_800_000, "11/21/2099"),
+        ] {
+            let formatted = chinese
+                .backend
+                .format(IntlDateTimeInput {
+                    utc_milliseconds: milliseconds,
+                    offset_milliseconds: 0,
+                })
+                .unwrap();
+            let formatted = String::from_utf16(&formatted).unwrap();
+            assert!(
+                formatted.starts_with(expected),
+                "unexpected Chinese snapshot for {milliseconds}: {formatted}"
+            );
+        }
+
+        let zh = create(
+            "en-US",
+            request_for(
+                "zh-u-ca-chinese",
+                IntlDateTimeFormatOptions {
+                    year: Some(IntlDateTimeNumericStyle::Numeric),
+                    ..Default::default()
+                },
+            ),
+        )
+        .unwrap();
+        let formatted = zh
+            .backend
+            .format(IntlDateTimeInput {
+                utc_milliseconds: 1_559_347_200_000,
+                offset_milliseconds: 0,
+            })
+            .unwrap();
+        assert_eq!(String::from_utf16(&formatted).unwrap(), "2019己亥年");
+
+        let dangi = create("en-US", request_for("en-US-u-ca-dangi", Default::default())).unwrap();
+        let formatted = dangi
+            .backend
+            .format(IntlDateTimeInput {
+                utc_milliseconds: 2_524_608_000_000,
+                offset_milliseconds: 0,
+            })
+            .unwrap();
+        assert!(
+            String::from_utf16(&formatted)
+                .unwrap()
+                .starts_with("12/8/2049")
+        );
     }
 }

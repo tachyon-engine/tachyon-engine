@@ -2032,6 +2032,7 @@ name = "tachyon-intl-icu4x"
 version = "0.1.0"
 dependencies = [
  "fixed_decimal",
+ "icu_calendar",
  "icu_collator",
  "icu_decimal",
  "icu_locale",
