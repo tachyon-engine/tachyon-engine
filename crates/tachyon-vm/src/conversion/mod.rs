@@ -449,6 +449,15 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::IntlRelativeTimeFormatValue {
+                        let state = self
+                            .pending_intl_relative_time_format_reference(continuation.receiver)?;
+                        return self.resume_intl_relative_time_format_value_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::IntlDateTimeFormatValue {
                         let state = self.native_call_state_reference(continuation.receiver)?;
                         return self.resume_intl_date_time_format_value_conversion(
@@ -676,6 +685,26 @@ impl Isolate {
                         let state =
                             self.pending_intl_plural_rules_reference(continuation.receiver)?;
                         return self.resume_intl_plural_rules_option_primitive(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
+                    if continuation.consumer
+                        == ConversionConsumer::IntlRelativeTimeFormatStringOption
+                    {
+                        let state = self
+                            .pending_intl_relative_time_format_reference(continuation.receiver)?;
+                        return self.resume_intl_relative_time_format_option_primitive(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
+                    if continuation.consumer == ConversionConsumer::IntlRelativeTimeFormatUnit {
+                        let state = self
+                            .pending_intl_relative_time_format_reference(continuation.receiver)?;
+                        return self.resume_intl_relative_time_format_unit_conversion(
                             continuation.site,
                             state,
                             value,
@@ -1761,6 +1790,11 @@ impl Isolate {
                 }
                 ConversionConsumer::IntlPluralRulesValue => {
                     unreachable!("PluralRules value conversion resumes inside its state machine")
+                }
+                ConversionConsumer::IntlRelativeTimeFormatStringOption
+                | ConversionConsumer::IntlRelativeTimeFormatValue
+                | ConversionConsumer::IntlRelativeTimeFormatUnit => {
+                    unreachable!("RelativeTimeFormat conversion resumes inside its state machine")
                 }
                 ConversionConsumer::IntlDateTimeFormatValue => {
                     unreachable!("DateTimeFormat value conversion resumes inside its state machine")

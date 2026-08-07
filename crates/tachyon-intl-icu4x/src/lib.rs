@@ -12,6 +12,7 @@ mod date_time_format;
 mod list_format;
 mod number_format;
 mod plural_rules;
+mod relative_time_format;
 mod supported_values;
 mod tuning;
 
@@ -24,7 +25,7 @@ use tachyon_vm::{
     HostProviderError, IntlCollatorCreation, IntlCollatorRequest, IntlDateTimeFormatCreation,
     IntlDateTimeFormatRequest, IntlLocaleMatcher, IntlLocaleRequest, IntlNumberFormatCreation,
     IntlNumberFormatRequest, IntlPluralRulesCreation, IntlPluralRulesRequest, IntlProvider,
-    IntlSupportedValuesKey,
+    IntlRelativeTimeFormatCreation, IntlRelativeTimeFormatRequest, IntlSupportedValuesKey,
 };
 
 /// Extension aliases required by UTS 35 but absent from ICU4X 2.0's locale canonicalizer.
@@ -279,6 +280,21 @@ impl IntlProvider for Icu4xIntlProvider {
         matcher: IntlLocaleMatcher,
     ) -> Result<Box<[Box<str>]>, HostProviderError> {
         Ok(plural_rules::supported_locales(locales, matcher))
+    }
+
+    fn create_relative_time_format(
+        &mut self,
+        request: IntlRelativeTimeFormatRequest,
+    ) -> Result<IntlRelativeTimeFormatCreation, HostProviderError> {
+        relative_time_format::create(self.default_locale.as_ref(), request)
+    }
+
+    fn relative_time_format_supported_locales(
+        &mut self,
+        locales: &[Box<str>],
+        matcher: IntlLocaleMatcher,
+    ) -> Result<Box<[Box<str>]>, HostProviderError> {
+        Ok(relative_time_format::supported_locales(locales, matcher))
     }
 
     fn create_date_time_format(

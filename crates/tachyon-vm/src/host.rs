@@ -646,6 +646,97 @@ pub struct IntlPluralRulesCreation {
     pub backend: Box<dyn IntlPluralRulesBackend>,
 }
 
+/// Width selected by `Intl.RelativeTimeFormat`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlRelativeTimeFormatStyle {
+    #[default]
+    Long,
+    Short,
+    Narrow,
+}
+
+/// Whether lexical relative phrases may replace numeric patterns.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlRelativeTimeFormatNumeric {
+    #[default]
+    Always,
+    Auto,
+}
+
+/// Canonical singular relative-time unit set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlRelativeTimeUnit {
+    Second,
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Year,
+}
+
+/// Locale negotiation and already converted RelativeTimeFormat options.
+#[derive(Debug, Eq, PartialEq)]
+pub struct IntlRelativeTimeFormatRequest {
+    pub locales: Box<[Box<str>]>,
+    pub locale_matcher: IntlLocaleMatcher,
+    pub numbering_system: Option<Box<str>>,
+    pub style: IntlRelativeTimeFormatStyle,
+    pub numeric: IntlRelativeTimeFormatNumeric,
+}
+
+/// Resolved scalar slots published through `resolvedOptions`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntlRelativeTimeFormatResolved {
+    pub locale: Box<str>,
+    pub numbering_system: Box<str>,
+    pub style: IntlRelativeTimeFormatStyle,
+    pub numeric: IntlRelativeTimeFormatNumeric,
+}
+
+/// One formatted RelativeTimeFormat span; number spans retain their canonical unit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IntlRelativeTimePartSpan {
+    pub kind: IntlNumberFormatPartType,
+    pub start: u32,
+    pub end: u32,
+    pub has_unit: bool,
+}
+
+/// Gap-free provider-owned RelativeTimeFormat output.
+#[derive(Debug, Eq, PartialEq)]
+pub struct IntlFormattedRelativeTimeParts {
+    pub formatted: Box<[u16]>,
+    pub spans: Box<[IntlRelativeTimePartSpan]>,
+}
+
+/// Opaque locale-pattern, number-format, and plural-rule state retained by one object.
+pub trait IntlRelativeTimeFormatBackend: Send {
+    fn format(
+        &self,
+        value: &IntlMathematicalValue,
+        unit: IntlRelativeTimeUnit,
+    ) -> Result<Box<[u16]>, HostProviderError>;
+
+    fn format_to_parts(
+        &self,
+        value: &IntlMathematicalValue,
+        unit: IntlRelativeTimeUnit,
+    ) -> Result<IntlFormattedRelativeTimeParts, HostProviderError>;
+
+    fn external_memory_bytes(&self) -> usize;
+}
+
+/// One resolved RelativeTimeFormat snapshot paired with its reusable provider backend.
+pub struct IntlRelativeTimeFormatCreation {
+    pub resolved: IntlRelativeTimeFormatResolved,
+    pub backend: Box<dyn IntlRelativeTimeFormatBackend>,
+}
+
 /// Locale-sensitive width shared by textual date-time fields.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1049,6 +1140,23 @@ pub trait IntlProvider: Send {
 
     /// Filters canonical requested locales using plural-rule data availability.
     fn plural_rules_supported_locales(
+        &mut self,
+        _locales: &[Box<str>],
+        _matcher: IntlLocaleMatcher,
+    ) -> Result<Box<[Box<str>]>, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+
+    /// Creates reusable relative-time pattern, number, and plural state.
+    fn create_relative_time_format(
+        &mut self,
+        _request: IntlRelativeTimeFormatRequest,
+    ) -> Result<IntlRelativeTimeFormatCreation, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+
+    /// Filters canonical requests using RelativeTimeFormat locale data availability.
+    fn relative_time_format_supported_locales(
         &mut self,
         _locales: &[Box<str>],
         _matcher: IntlLocaleMatcher,

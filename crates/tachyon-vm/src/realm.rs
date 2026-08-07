@@ -4268,6 +4268,91 @@ impl Isolate {
             },
         )?;
 
+        let relative_time_format_prototype =
+            self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: object_prototype,
+            })?;
+        self.realm.intl_relative_time_format_prototype = Some(relative_time_format_prototype);
+        let relative_time_format_constructor = self.allocate_native_function(
+            NativeFunction::IntlRelativeTimeFormatConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.intl_relative_time_format_constructor = Some(relative_time_format_constructor);
+        self.set_function_prototype(
+            relative_time_format_constructor,
+            relative_time_format_prototype,
+        )?;
+        self.set_intrinsic_data_property(
+            relative_time_format_prototype,
+            constructor_atom,
+            relative_time_format_constructor,
+            true,
+        )?;
+        let relative_time_format_atom = self.intern_intrinsic_name(b"RelativeTimeFormat")?;
+        self.set_intrinsic_data_property(
+            object,
+            relative_time_format_atom,
+            relative_time_format_constructor,
+            true,
+        )?;
+        for (name, native) in [
+            (
+                b"format".as_slice(),
+                NativeFunction::IntlRelativeTimeFormatFormat,
+            ),
+            (
+                b"formatToParts".as_slice(),
+                NativeFunction::IntlRelativeTimeFormatFormatToParts,
+            ),
+            (
+                b"resolvedOptions".as_slice(),
+                NativeFunction::IntlRelativeTimeFormatResolvedOptions,
+            ),
+        ] {
+            self.install_collection_method(
+                relative_time_format_prototype,
+                function_prototype,
+                name,
+                native,
+            )?;
+        }
+        let relative_time_format_supported_locales = self.allocate_native_function(
+            NativeFunction::IntlRelativeTimeFormatSupportedLocalesOf,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.set_intrinsic_data_property(
+            relative_time_format_constructor,
+            supported_locales_atom,
+            relative_time_format_supported_locales,
+            true,
+        )?;
+        let relative_time_format_tag_atom =
+            self.intern_intrinsic_name(b"Intl.RelativeTimeFormat")?;
+        let relative_time_format_tag = self.atom_string_value(relative_time_format_tag_atom)?;
+        self.define_data_property(
+            relative_time_format_prototype,
+            to_string_tag,
+            DataPropertyDescriptor {
+                value: Some(relative_time_format_tag),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+
         let collator_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
             shape: ShapeId::EMPTY,
             extensible: true,

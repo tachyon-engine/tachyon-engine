@@ -489,6 +489,14 @@ impl Isolate {
                     |object| &mut object.ordinary,
                 )?;
             }
+            ObjectReceiver::IntlRelativeTimeFormat(relative_time_format) => {
+                self.set_embedded_object_prototype(
+                    relative_time_format,
+                    self.types.intl_relative_time_format_object,
+                    prototype,
+                    |object| &mut object.ordinary,
+                )?;
+            }
             _ => return Err(ExecutionError::UnsupportedAccessorDescriptor),
         }
         Ok(true)
@@ -1307,6 +1315,29 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::IntlPluralRules(plural_rules), ordinary));
         }
+        if let Ok(relative_time_format) = self
+            .heap
+            .checked_reference(raw, self.types.intl_relative_time_format_object)
+        {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let relative_time_format = scope
+                    .root(relative_time_format)
+                    .map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(
+                            relative_time_format,
+                            self.types.intl_relative_time_format_object,
+                        )
+                        .map(|relative_time_format| relative_time_format.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((
+                ObjectReceiver::IntlRelativeTimeFormat(relative_time_format),
+                ordinary,
+            ));
+        }
         if let Ok(date_time_format) = self
             .heap
             .checked_reference(raw, self.types.intl_date_time_format_object)
@@ -1758,6 +1789,13 @@ impl Isolate {
                 extensible,
                 |object| &mut object.ordinary,
             ),
+            ObjectReceiver::IntlRelativeTimeFormat(relative_time_format) => self
+                .set_embedded_object_extensible(
+                    relative_time_format,
+                    self.types.intl_relative_time_format_object,
+                    extensible,
+                    |object| &mut object.ordinary,
+                ),
             ObjectReceiver::Number(number) => self.heap.with_running_scope(|scope| {
                 let number = scope.root(number).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -2162,6 +2200,13 @@ impl Isolate {
                 shape,
                 |object| &mut object.ordinary,
             ),
+            ObjectReceiver::IntlRelativeTimeFormat(relative_time_format) => self
+                .set_embedded_object_shape(
+                    relative_time_format,
+                    self.types.intl_relative_time_format_object,
+                    shape,
+                    |object| &mut object.ordinary,
+                ),
             ObjectReceiver::Number(number) => self.heap.with_running_scope(|scope| {
                 let number = scope.root(number).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -2673,6 +2718,14 @@ impl Isolate {
                 storage,
                 |object| &mut object.ordinary,
             ),
+            ObjectReceiver::IntlRelativeTimeFormat(relative_time_format) => self
+                .update_embedded_object_storage(
+                    relative_time_format,
+                    self.types.intl_relative_time_format_object,
+                    shape,
+                    storage,
+                    |object| &mut object.ordinary,
+                ),
             ObjectReceiver::Number(number) => self.heap.with_running_scope(|scope| {
                 let number = scope.root(number).map_err(ExecutionError::Root)?;
                 let storage_local = storage
@@ -3224,6 +3277,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.intl_plural_rules_object)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.intl_relative_time_format_object)
                 .is_ok()
             || self
                 .heap

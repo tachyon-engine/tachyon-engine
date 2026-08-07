@@ -365,6 +365,9 @@ pub(crate) enum ConversionConsumer {
     IntlPluralRulesStringOption,
     IntlPluralRulesNumberOption,
     IntlPluralRulesValue,
+    IntlRelativeTimeFormatStringOption,
+    IntlRelativeTimeFormatValue,
+    IntlRelativeTimeFormatUnit,
     IntlDateTimeFormatStringOption,
     IntlDateTimeFormatNumberOption,
     IntlDateTimeFormatValue,
@@ -538,6 +541,9 @@ impl ConversionConsumer {
             | Self::IntlPluralRulesStringOption
             | Self::IntlPluralRulesNumberOption
             | Self::IntlPluralRulesValue
+            | Self::IntlRelativeTimeFormatStringOption
+            | Self::IntlRelativeTimeFormatValue
+            | Self::IntlRelativeTimeFormatUnit
             | Self::IntlDateTimeFormatStringOption
             | Self::IntlDateTimeFormatNumberOption
             | Self::IntlDateTimeFormatValue
@@ -701,6 +707,8 @@ impl ConversionConsumer {
                 | Self::IntlSupportedValuesKey
                 | Self::IntlCollatorOption
                 | Self::IntlNumberFormatStringOption
+                | Self::IntlRelativeTimeFormatStringOption
+                | Self::IntlRelativeTimeFormatUnit
                 | Self::IntlDateTimeFormatStringOption
                 | Self::IntlCollatorCompareLeft
                 | Self::IntlCollatorCompareRight
@@ -937,6 +945,7 @@ pub(crate) enum PropertyCallbackMode {
     IntlLocale,
     IntlListFormat,
     IntlPluralRules,
+    IntlRelativeTimeFormat,
     CopyDataProperties,
     DefineProperties,
 }
@@ -1830,6 +1839,21 @@ pub(crate) enum IntlPluralRulesStage {
     Select,
 }
 
+/// Observable boundaries in RelativeTimeFormat construction and two-argument formatting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum IntlRelativeTimeFormatStage {
+    Locales,
+    LocaleMatcher,
+    NumberingSystem,
+    Style,
+    Numeric,
+    FormatValue,
+    FormatUnit,
+    FormatToPartsValue,
+    FormatToPartsUnit,
+}
+
 /// Observable boundaries in `Intl.Collator` construction and locale filtering.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -2054,6 +2078,7 @@ pub(crate) enum NativeContinuationKind {
     IntlLocale(IntlLocaleStage),
     IntlListFormat(IntlListFormatStage),
     IntlPluralRules(IntlPluralRulesStage),
+    IntlRelativeTimeFormat(IntlRelativeTimeFormatStage),
     IntlCollator(IntlCollatorStage),
     IntlNumberFormat(IntlNumberFormatStage),
     IntlDateTimeFormat(IntlDateTimeFormatStage),
@@ -2314,6 +2339,37 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::PropertyGet(PropertyCallbackMode::IntlPluralRules),
+            first: state,
+            second: options,
+        }
+    }
+
+    /// Roots pending RelativeTimeFormat state across locale, option, and argument callbacks.
+    #[inline]
+    pub(crate) const fn intl_relative_time_format(
+        site: NativeContinuationSite,
+        stage: IntlRelativeTimeFormatStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::IntlRelativeTimeFormat(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots pending RelativeTimeFormat state while an ordinary option getter executes JS.
+    #[inline]
+    pub(crate) const fn intl_relative_time_format_property_get(
+        site: NativeContinuationSite,
+        state: Value,
+        options: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PropertyGet(PropertyCallbackMode::IntlRelativeTimeFormat),
             first: state,
             second: options,
         }

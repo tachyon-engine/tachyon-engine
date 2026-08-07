@@ -67,6 +67,7 @@ mod intl_date_time_format_substrate;
 mod intl_list_format_substrate;
 mod intl_number_format_substrate;
 mod intl_plural_rules_substrate;
+mod intl_relative_time_format_substrate;
 mod iterator_flat_map;
 mod iterator_intrinsics;
 mod math_conversion;

@@ -267,6 +267,8 @@ pub(crate) struct Realm {
     pub(crate) intl_list_format_prototype: Option<Value>,
     pub(crate) intl_plural_rules_constructor: Option<Value>,
     pub(crate) intl_plural_rules_prototype: Option<Value>,
+    pub(crate) intl_relative_time_format_constructor: Option<Value>,
+    pub(crate) intl_relative_time_format_prototype: Option<Value>,
     pub(crate) intl_get_canonical_locales: Option<Value>,
     pub(crate) intl_supported_values_of: Option<Value>,
     pub(crate) intl_collator_constructor: Option<Value>,
@@ -493,6 +495,8 @@ impl Realm {
             intl_list_format_prototype: None,
             intl_plural_rules_constructor: None,
             intl_plural_rules_prototype: None,
+            intl_relative_time_format_constructor: None,
+            intl_relative_time_format_prototype: None,
             intl_get_canonical_locales: None,
             intl_supported_values_of: None,
             intl_collator_constructor: None,
@@ -986,6 +990,8 @@ impl Trace for Realm {
         self.intl_list_format_prototype.trace(tracer);
         self.intl_plural_rules_constructor.trace(tracer);
         self.intl_plural_rules_prototype.trace(tracer);
+        self.intl_relative_time_format_constructor.trace(tracer);
+        self.intl_relative_time_format_prototype.trace(tracer);
         self.intl_get_canonical_locales.trace(tracer);
         self.intl_supported_values_of.trace(tracer);
         self.intl_collator_constructor.trace(tracer);
