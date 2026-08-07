@@ -13,7 +13,8 @@ use tachyon_vm::{
     IntlDateTimeFormatOptions, IntlDateTimeFormatRequest, IntlDateTimeFormatResolved,
     IntlDateTimeHourCycle, IntlDateTimeInput, IntlDateTimeMonthStyle, IntlDateTimeNumericStyle,
     IntlDateTimePartSpan, IntlDateTimePartType, IntlDateTimeStyle, IntlDateTimeTextStyle,
-    IntlDateTimeZoneNameStyle, IntlFormattedDateTimeParts, IntlLocaleMatcher,
+    IntlDateTimeZoneNameStyle, IntlFormattedDateTimeParts, IntlFormattedDateTimeRangeParts,
+    IntlLocaleMatcher,
 };
 
 use crate::{
@@ -27,6 +28,8 @@ const MILLIS_PER_DAY: i64 = 86_400_000;
 const MILLIS_PER_HOUR: i64 = 3_600_000;
 const MILLIS_PER_MINUTE: i64 = 60_000;
 const MILLIS_PER_SECOND: i64 = 1_000;
+
+mod range;
 
 /// Send-safe resolved pattern state; no ICU payload or shared ownership crosses construction.
 struct Icu4xDateTimeFormatBackend {
@@ -85,6 +88,15 @@ impl IntlDateTimeFormatBackend for Icu4xDateTimeFormatBackend {
             formatted: rendered.formatted.into_boxed_slice(),
             spans: rendered.spans.unwrap_or_default().into_boxed_slice(),
         })
+    }
+
+    /// Applies the pinned en-US interval pattern while preserving the generic endpoint fallback.
+    fn format_range_to_parts(
+        &self,
+        start: IntlDateTimeInput,
+        end: IntlDateTimeInput,
+    ) -> Result<IntlFormattedDateTimeRangeParts, HostProviderError> {
+        range::format_range_to_parts(self, start, end)
     }
 
     #[inline(always)]
