@@ -876,6 +876,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00210d6893afc98edb752b664b8890f0ef174c8adbb8d0be9710fa66fbbf72d3"
 
 [[package]]
+name = "icu_plurals"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fd83a65f58b6f28e1f3da8c6ada6b415ee3ad5cb480b75bdb669f34d72dd179"
+dependencies = [
+ "displaydoc",
+ "fixed_decimal",
+ "icu_locale",
+ "icu_plurals_data",
+ "icu_provider",
+ "zerovec",
+]
+
+[[package]]
+name = "icu_plurals_data"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ec552d761eaf4a1c39ad28936e0af77a41bf01ff756ea54be4f8bfc21c265d7"
+
+[[package]]
 name = "icu_properties"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2065,6 +2085,7 @@ dependencies = [
  "icu_list",
  "icu_locale",
  "icu_locale_core",
+ "icu_plurals",
  "icu_provider",
  "icu_time",
  "tachyon-vm",

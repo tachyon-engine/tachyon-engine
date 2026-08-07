@@ -18,6 +18,7 @@ icu_decimal = { version = "=2.0.0", default-features = false, features = ["alloc
 icu_locale = { version = "=2.0.0", default-features = false, features = ["compiled_data"] }
 icu_locale_core = { version = "=2.0.0", default-features = false }
 icu_list = { version = "=2.0.0", default-features = false, features = ["compiled_data"] }
+icu_plurals = { version = "=2.0.0", default-features = false, features = ["compiled_data"] }
 icu_provider = { version = "=2.0.0", default-features = false }
 icu_time = { version = "=2.0.0", default-features = false, features = ["compiled_data"] }
 tachyon-vm = { path = "../tachyon-vm" }

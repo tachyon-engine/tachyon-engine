@@ -440,6 +440,15 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::IntlPluralRulesValue {
+                        let state =
+                            self.pending_intl_plural_rules_reference(continuation.receiver)?;
+                        return self.resume_intl_plural_rules_value_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::IntlDateTimeFormatValue {
                         let state = self.native_call_state_reference(continuation.receiver)?;
                         return self.resume_intl_date_time_format_value_conversion(
@@ -654,6 +663,19 @@ impl Isolate {
                         let state =
                             self.pending_intl_number_format_reference(continuation.receiver)?;
                         return self.resume_intl_number_format_option_primitive(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::IntlPluralRulesStringOption
+                            | ConversionConsumer::IntlPluralRulesNumberOption
+                    ) {
+                        let state =
+                            self.pending_intl_plural_rules_reference(continuation.receiver)?;
+                        return self.resume_intl_plural_rules_option_primitive(
                             continuation.site,
                             state,
                             value,
@@ -1732,6 +1754,13 @@ impl Isolate {
                 }
                 ConversionConsumer::IntlNumberFormatValue => {
                     unreachable!("NumberFormat value conversion resumes inside its state machine")
+                }
+                ConversionConsumer::IntlPluralRulesStringOption
+                | ConversionConsumer::IntlPluralRulesNumberOption => {
+                    unreachable!("PluralRules option conversion resumes inside its state machine")
+                }
+                ConversionConsumer::IntlPluralRulesValue => {
+                    unreachable!("PluralRules value conversion resumes inside its state machine")
                 }
                 ConversionConsumer::IntlDateTimeFormatValue => {
                     unreachable!("DateTimeFormat value conversion resumes inside its state machine")

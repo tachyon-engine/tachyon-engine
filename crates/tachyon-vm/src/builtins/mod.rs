@@ -19,6 +19,7 @@ mod intl_list_format;
 mod intl_locale;
 mod intl_number_format;
 mod intl_number_format_options;
+mod intl_plural_rules;
 mod json;
 mod map_upsert;
 mod math;
@@ -41,6 +42,7 @@ pub(crate) use intl_date_time_format::{DateTimeLocaleKind, PendingIntlDateTimeFo
 pub(crate) use intl_list_format::PendingIntlListFormat;
 pub(crate) use intl_locale::PendingIntlLocale;
 pub(crate) use intl_number_format_options::PendingIntlNumberFormat;
+pub(crate) use intl_plural_rules::PendingIntlPluralRules;
 pub(crate) use json::PendingJsonStringify;
 pub(crate) use math::{math_variadic_add, math_variadic_finish, math_variadic_initial};
 pub(crate) use regexp::advance_regexp_split_index;

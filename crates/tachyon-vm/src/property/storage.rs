@@ -481,6 +481,14 @@ impl Isolate {
                     |object| &mut object.ordinary,
                 )?;
             }
+            ObjectReceiver::IntlPluralRules(plural_rules) => {
+                self.set_embedded_object_prototype(
+                    plural_rules,
+                    self.types.intl_plural_rules_object,
+                    prototype,
+                    |object| &mut object.ordinary,
+                )?;
+            }
             _ => return Err(ExecutionError::UnsupportedAccessorDescriptor),
         }
         Ok(true)
@@ -1284,6 +1292,21 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::IntlNumberFormat(number_format), ordinary));
         }
+        if let Ok(plural_rules) = self
+            .heap
+            .checked_reference(raw, self.types.intl_plural_rules_object)
+        {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let plural_rules = scope.root(plural_rules).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(plural_rules, self.types.intl_plural_rules_object)
+                        .map(|plural_rules| plural_rules.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::IntlPluralRules(plural_rules), ordinary));
+        }
         if let Ok(date_time_format) = self
             .heap
             .checked_reference(raw, self.types.intl_date_time_format_object)
@@ -1729,6 +1752,12 @@ impl Isolate {
                 extensible,
                 |object| &mut object.ordinary,
             ),
+            ObjectReceiver::IntlPluralRules(plural_rules) => self.set_embedded_object_extensible(
+                plural_rules,
+                self.types.intl_plural_rules_object,
+                extensible,
+                |object| &mut object.ordinary,
+            ),
             ObjectReceiver::Number(number) => self.heap.with_running_scope(|scope| {
                 let number = scope.root(number).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -2124,6 +2153,12 @@ impl Isolate {
             ObjectReceiver::IntlNumberFormat(number_format) => self.set_embedded_object_shape(
                 number_format,
                 self.types.intl_number_format_object,
+                shape,
+                |object| &mut object.ordinary,
+            ),
+            ObjectReceiver::IntlPluralRules(plural_rules) => self.set_embedded_object_shape(
+                plural_rules,
+                self.types.intl_plural_rules_object,
                 shape,
                 |object| &mut object.ordinary,
             ),
@@ -2627,6 +2662,13 @@ impl Isolate {
             ObjectReceiver::IntlNumberFormat(number_format) => self.update_embedded_object_storage(
                 number_format,
                 self.types.intl_number_format_object,
+                shape,
+                storage,
+                |object| &mut object.ordinary,
+            ),
+            ObjectReceiver::IntlPluralRules(plural_rules) => self.update_embedded_object_storage(
+                plural_rules,
+                self.types.intl_plural_rules_object,
                 shape,
                 storage,
                 |object| &mut object.ordinary,
@@ -3178,6 +3220,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.intl_number_format_object)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.intl_plural_rules_object)
                 .is_ok()
             || self
                 .heap

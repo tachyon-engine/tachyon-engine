@@ -8,7 +8,8 @@ use tachyon_value::{RawHeapRef, Value};
 use crate::{
     AtomId, CodeId, IntlCollatorBackend, IntlCollatorCaseFirst, IntlCollatorSensitivity,
     IntlCollatorUsage, IntlDateTimeFormatBackend, IntlDateTimeFormatResolved, IntlListFormatStyle,
-    IntlListFormatType, IntlNumberFormatBackend, IntlNumberFormatResolved, tuning::objects,
+    IntlListFormatType, IntlNumberFormatBackend, IntlNumberFormatResolved, IntlPluralCategory,
+    IntlPluralRulesBackend, IntlPluralRulesResolved, tuning::objects,
 };
 use tachyon_bytecode::FunctionId;
 
@@ -747,6 +748,47 @@ pub(crate) struct IntlNumberFormatObject {
     pub(crate) ordinary: OrdinaryObject,
     pub(crate) payload: GcRef<IntlNumberFormatPayload>,
     pub(crate) cached_bound_format: Value,
+}
+
+/// Provider-owned PluralRules backend and resolved slots with no managed JavaScript edges.
+pub(crate) struct IntlPluralRulesPayload {
+    pub(crate) backend: Box<dyn IntlPluralRulesBackend>,
+    pub(crate) resolved: IntlPluralRulesResolved,
+}
+
+impl Trace for IntlPluralRulesPayload {
+    #[inline(always)]
+    fn trace(&mut self, _tracer: &mut dyn Tracer) {}
+}
+
+impl GcExternalMemory for IntlPluralRulesPayload {
+    fn external_memory_bytes(&self) -> usize {
+        size_of_val(&*self.backend)
+            .saturating_add(self.backend.external_memory_bytes())
+            .saturating_add(self.resolved.locale.len())
+            .saturating_add(
+                self.resolved
+                    .categories
+                    .len()
+                    .saturating_mul(size_of::<IntlPluralCategory>()),
+            )
+    }
+}
+
+/// Branded `Intl.PluralRules` object retaining only ordinary state and provider payload.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub(crate) struct IntlPluralRulesObject {
+    pub(crate) ordinary: OrdinaryObject,
+    pub(crate) payload: GcRef<IntlPluralRulesPayload>,
+}
+
+impl Trace for IntlPluralRulesObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.ordinary.trace(tracer);
+        self.payload.trace(tracer);
+    }
 }
 
 impl Trace for IntlNumberFormatObject {

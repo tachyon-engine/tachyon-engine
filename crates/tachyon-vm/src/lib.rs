@@ -119,8 +119,10 @@ pub use host::{
     IntlNumberFormatPartSpan, IntlNumberFormatPartType, IntlNumberFormatRequest,
     IntlNumberFormatResolved, IntlNumberFormatRoundingMode, IntlNumberFormatRoundingPriority,
     IntlNumberFormatSignDisplay, IntlNumberFormatStyle, IntlNumberFormatTrailingZeroDisplay,
-    IntlNumberFormatUnitDisplay, IntlNumberFormatUseGrouping, IntlProvider, IntlSupportedValuesKey,
-    SharedMemoryId, TimeZoneProvider, WallClockProvider,
+    IntlNumberFormatUnitDisplay, IntlNumberFormatUseGrouping, IntlPluralCategory,
+    IntlPluralRuleType, IntlPluralRulesBackend, IntlPluralRulesCreation, IntlPluralRulesRequest,
+    IntlPluralRulesResolved, IntlProvider, IntlSupportedValuesKey, SharedMemoryId,
+    TimeZoneProvider, WallClockProvider,
 };
 pub use isolate::Isolate;
 pub use module::{
@@ -222,6 +224,7 @@ pub(crate) enum IntrinsicPrototypeKind {
     IntlListFormat,
     IntlLocale,
     IntlNumberFormat,
+    IntlPluralRules,
     SignalState,
     SignalComputed,
     SignalWatcher,
@@ -258,8 +261,8 @@ use builtins::object::PendingGetOwnPropertyDescriptors;
 use builtins::signals::{ComputedSignal, SignalRuntime, StateSignal, WatcherSignal};
 use builtins::{
     PendingDateNumericArguments, PendingIntlCollator, PendingIntlDateTimeFormat,
-    PendingIntlNumberFormat, PendingJsonStringify, math_variadic_add, math_variadic_finish,
-    math_variadic_initial,
+    PendingIntlNumberFormat, PendingIntlPluralRules, PendingJsonStringify, math_variadic_add,
+    math_variadic_finish, math_variadic_initial,
 };
 use collection::{
     CollectionInitializerKind, MapObject, OrderedCollection, PendingCollectionForEach,
@@ -289,10 +292,10 @@ use object::{
     ArgumentsObject, BigIntObject, BooleanObject, DateObject, IntlCollatorBackendPayload,
     IntlCollatorObject, IntlCollatorResolvedOptions, IntlDateTimeFormatObject,
     IntlDateTimeFormatPayload, IntlListFormatObject, IntlLocaleObject, IntlNumberFormatObject,
-    IntlNumberFormatPayload, NumberObject, OrdinaryObject, PropertyAttributes, PropertyKey,
-    PropertyKind, PropertyLookup, PropertyStorage, RegExpObject, ShapeId, ShapeTable,
-    SharedArrayBufferBacking, SharedArrayBufferData, StringObject, SymbolId, SymbolObject,
-    SymbolPropertyKey,
+    IntlNumberFormatPayload, IntlPluralRulesObject, IntlPluralRulesPayload, NumberObject,
+    OrdinaryObject, PropertyAttributes, PropertyKey, PropertyKind, PropertyLookup, PropertyStorage,
+    RegExpObject, ShapeId, ShapeTable, SharedArrayBufferBacking, SharedArrayBufferData,
+    StringObject, SymbolId, SymbolObject, SymbolPropertyKey,
 };
 use promise_combinator_state::{
     PendingPromiseCombinator, PromiseCombinatorElement, PromiseCombinatorKind,
@@ -592,6 +595,7 @@ pub enum ExecutionError {
     InvalidIntlListFormatOption,
     InvalidIntlListFormatElement(Value),
     InvalidIntlNumberFormatOption,
+    InvalidIntlPluralRulesOption,
     MissingIntlNumberFormatCurrency,
     MissingIntlNumberFormatUnit,
     InvalidIntlNumberFormatRoundingIncrementCombination,
@@ -600,6 +604,7 @@ pub enum ExecutionError {
     IncompatibleIntlDateTimeFormatReceiver(Value),
     IncompatibleIntlListFormatReceiver(Value),
     IncompatibleIntlNumberFormatReceiver(Value),
+    IncompatibleIntlPluralRulesReceiver(Value),
     InvalidUriEncoding,
     UnsupportedTypeof(Value),
     InvalidCode(CodeId),

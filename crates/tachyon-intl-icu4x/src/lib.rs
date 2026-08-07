@@ -11,6 +11,7 @@ mod collator;
 mod date_time_format;
 mod list_format;
 mod number_format;
+mod plural_rules;
 mod supported_values;
 mod tuning;
 
@@ -22,7 +23,8 @@ use icu_locale::{
 use tachyon_vm::{
     HostProviderError, IntlCollatorCreation, IntlCollatorRequest, IntlDateTimeFormatCreation,
     IntlDateTimeFormatRequest, IntlLocaleMatcher, IntlLocaleRequest, IntlNumberFormatCreation,
-    IntlNumberFormatRequest, IntlProvider, IntlSupportedValuesKey,
+    IntlNumberFormatRequest, IntlPluralRulesCreation, IntlPluralRulesRequest, IntlProvider,
+    IntlSupportedValuesKey,
 };
 
 /// Extension aliases required by UTS 35 but absent from ICU4X 2.0's locale canonicalizer.
@@ -262,6 +264,21 @@ impl IntlProvider for Icu4xIntlProvider {
         matcher: IntlLocaleMatcher,
     ) -> Result<Box<[Box<str>]>, HostProviderError> {
         Ok(number_format::supported_locales(locales, matcher))
+    }
+
+    fn create_plural_rules(
+        &mut self,
+        request: IntlPluralRulesRequest,
+    ) -> Result<IntlPluralRulesCreation, HostProviderError> {
+        plural_rules::create(self.default_locale.as_ref(), request)
+    }
+
+    fn plural_rules_supported_locales(
+        &mut self,
+        locales: &[Box<str>],
+        matcher: IntlLocaleMatcher,
+    ) -> Result<Box<[Box<str>]>, HostProviderError> {
+        Ok(plural_rules::supported_locales(locales, matcher))
     }
 
     fn create_date_time_format(

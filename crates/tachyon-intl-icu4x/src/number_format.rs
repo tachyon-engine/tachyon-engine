@@ -691,7 +691,7 @@ pub(super) struct DateTimeDecimalData {
 }
 
 /// Expands the bounded exponent syntax emitted by ECMAScript Number::toString without f64 loss.
-fn parse_mathematical_decimal(value: &str) -> Result<Decimal, HostProviderError> {
+pub(super) fn parse_mathematical_decimal(value: &str) -> Result<Decimal, HostProviderError> {
     if let Ok(decimal) = Decimal::from_str(value) {
         return Ok(decimal);
     }
@@ -1139,7 +1139,9 @@ const fn sign_display(value: IntlNumberFormatSignDisplay) -> SignDisplay {
     }
 }
 
-const fn fixed_decimal_rounding_mode(value: IntlNumberFormatRoundingMode) -> SignedRoundingMode {
+pub(super) const fn fixed_decimal_rounding_mode(
+    value: IntlNumberFormatRoundingMode,
+) -> SignedRoundingMode {
     match value {
         IntlNumberFormatRoundingMode::Ceil => SignedRoundingMode::Ceil,
         IntlNumberFormatRoundingMode::Floor => SignedRoundingMode::Floor,

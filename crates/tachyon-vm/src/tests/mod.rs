@@ -66,6 +66,7 @@ mod intl_collator_substrate;
 mod intl_date_time_format_substrate;
 mod intl_list_format_substrate;
 mod intl_number_format_substrate;
+mod intl_plural_rules_substrate;
 mod iterator_flat_map;
 mod iterator_intrinsics;
 mod math_conversion;

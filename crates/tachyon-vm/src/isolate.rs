@@ -52,6 +52,12 @@ struct IntlNumberFormatAllocationRoots<'a> {
     payload: Option<GcRef<IntlNumberFormatPayload>>,
 }
 
+struct IntlPluralRulesAllocationRoots<'a> {
+    vm: VmRoots<'a>,
+    prototype: Value,
+    payload: Option<GcRef<IntlPluralRulesPayload>>,
+}
+
 struct IntlDateTimeFormatAllocationRoots<'a> {
     vm: VmRoots<'a>,
     prototype: Value,
@@ -88,6 +94,15 @@ impl Trace for IntlCollatorAllocationRoots<'_> {
 }
 
 impl Trace for IntlNumberFormatAllocationRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.prototype.trace(tracer);
+        self.payload.trace(tracer);
+    }
+}
+
+impl Trace for IntlPluralRulesAllocationRoots<'_> {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.vm.trace(tracer);
@@ -190,6 +205,7 @@ impl Isolate {
             IntrinsicPrototypeKind::IntlListFormat => realm.intl_list_format_prototype,
             IntrinsicPrototypeKind::IntlLocale => realm.intl_locale_prototype,
             IntrinsicPrototypeKind::IntlNumberFormat => realm.intl_number_format_prototype,
+            IntrinsicPrototypeKind::IntlPluralRules => realm.intl_plural_rules_prototype,
             IntrinsicPrototypeKind::SignalState => realm.signal_state_prototype,
             IntrinsicPrototypeKind::SignalComputed => realm.signal_computed_prototype,
             IntrinsicPrototypeKind::SignalWatcher => realm.signal_watcher_prototype,
@@ -665,11 +681,20 @@ impl Isolate {
             pending_intl_number_format: registry
                 .try_register("PendingIntlNumberFormat")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_intl_plural_rules: registry
+                .try_register("PendingIntlPluralRules")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             intl_number_format_payload: registry
                 .try_register("IntlNumberFormatPayload")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             intl_number_format_object: registry
                 .try_register("IntlNumberFormatObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            intl_plural_rules_payload: registry
+                .try_register("IntlPluralRulesPayload")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            intl_plural_rules_object: registry
+                .try_register("IntlPluralRulesObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             proxy_object: registry
                 .try_register("ProxyObject")
@@ -1804,6 +1829,62 @@ impl Isolate {
                     },
                     payload,
                     cached_bound_format: Value::from_immediate(Immediate::Undefined),
+                },
+                space,
+                &mut roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Allocates one provider payload and branded PluralRules wrapper as a rooted unit.
+    pub(crate) fn allocate_intl_plural_rules_object(
+        &mut self,
+        creation: IntlPluralRulesCreation,
+        prototype: Value,
+        space: AllocationSpace,
+    ) -> Result<Value, ExecutionError> {
+        let mut roots = IntlPluralRulesAllocationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
+                loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
+            },
+            prototype,
+            payload: None,
+        };
+        let payload = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.intl_plural_rules_payload,
+                0,
+                IntlPluralRulesPayload {
+                    backend: creation.backend,
+                    resolved: creation.resolved,
+                },
+                space,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        roots.payload = Some(payload);
+        self.heap
+            .try_allocate_with_gc(
+                self.types.intl_plural_rules_object,
+                0,
+                0,
+                IntlPluralRulesObject {
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: roots.prototype,
+                    },
+                    payload,
                 },
                 space,
                 &mut roots,

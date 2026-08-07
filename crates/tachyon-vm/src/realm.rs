@@ -4191,6 +4191,83 @@ impl Isolate {
             },
         )?;
 
+        let plural_rules_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        self.realm.intl_plural_rules_prototype = Some(plural_rules_prototype);
+        let plural_rules_constructor = self.allocate_native_function(
+            NativeFunction::IntlPluralRulesConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.intl_plural_rules_constructor = Some(plural_rules_constructor);
+        self.set_function_prototype(plural_rules_constructor, plural_rules_prototype)?;
+        self.set_intrinsic_data_property(
+            plural_rules_prototype,
+            constructor_atom,
+            plural_rules_constructor,
+            true,
+        )?;
+        let plural_rules_atom = self.intern_intrinsic_name(b"PluralRules")?;
+        self.set_intrinsic_data_property(
+            object,
+            plural_rules_atom,
+            plural_rules_constructor,
+            true,
+        )?;
+        for (name, native) in [
+            (b"select".as_slice(), NativeFunction::IntlPluralRulesSelect),
+            (
+                b"selectRange".as_slice(),
+                NativeFunction::IntlPluralRulesSelectRange,
+            ),
+            (
+                b"resolvedOptions".as_slice(),
+                NativeFunction::IntlPluralRulesResolvedOptions,
+            ),
+        ] {
+            self.install_collection_method(
+                plural_rules_prototype,
+                function_prototype,
+                name,
+                native,
+            )?;
+        }
+        let plural_rules_supported_locales = self.allocate_native_function(
+            NativeFunction::IntlPluralRulesSupportedLocalesOf,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.set_intrinsic_data_property(
+            plural_rules_constructor,
+            supported_locales_atom,
+            plural_rules_supported_locales,
+            true,
+        )?;
+        let plural_rules_tag_atom = self.intern_intrinsic_name(b"Intl.PluralRules")?;
+        let plural_rules_tag = self.atom_string_value(plural_rules_tag_atom)?;
+        self.define_data_property(
+            plural_rules_prototype,
+            to_string_tag,
+            DataPropertyDescriptor {
+                value: Some(plural_rules_tag),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+
         let collator_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
             shape: ShapeId::EMPTY,
             extensible: true,

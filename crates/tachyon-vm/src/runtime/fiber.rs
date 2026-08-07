@@ -362,6 +362,9 @@ pub(crate) enum ConversionConsumer {
     IntlNumberFormatStringOption,
     IntlNumberFormatNumberOption,
     IntlNumberFormatValue,
+    IntlPluralRulesStringOption,
+    IntlPluralRulesNumberOption,
+    IntlPluralRulesValue,
     IntlDateTimeFormatStringOption,
     IntlDateTimeFormatNumberOption,
     IntlDateTimeFormatValue,
@@ -532,6 +535,9 @@ impl ConversionConsumer {
             | Self::IntlNumberFormatStringOption
             | Self::IntlNumberFormatNumberOption
             | Self::IntlNumberFormatValue
+            | Self::IntlPluralRulesStringOption
+            | Self::IntlPluralRulesNumberOption
+            | Self::IntlPluralRulesValue
             | Self::IntlDateTimeFormatStringOption
             | Self::IntlDateTimeFormatNumberOption
             | Self::IntlDateTimeFormatValue
@@ -930,6 +936,7 @@ pub(crate) enum PropertyCallbackMode {
     IntlDateTimeFormat,
     IntlLocale,
     IntlListFormat,
+    IntlPluralRules,
     CopyDataProperties,
     DefineProperties,
 }
@@ -1798,6 +1805,31 @@ pub(crate) enum IntlListFormatStage {
     FormatToParts,
 }
 
+/// Observable boundaries in PluralRules locale negotiation, digit options, and selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum IntlPluralRulesStage {
+    Locales,
+    LocaleMatcher,
+    Type,
+    Notation,
+    CompactDisplay,
+    MinimumIntegerDigits,
+    MinimumFractionDigits,
+    MaximumFractionDigits,
+    MinimumSignificantDigits,
+    MaximumSignificantDigits,
+    RoundingIncrement,
+    RoundingMode,
+    RoundingPriority,
+    TrailingZeroDisplay,
+    ConvertMinimumSignificantDigits,
+    ConvertMaximumSignificantDigits,
+    ConvertMinimumFractionDigits,
+    ConvertMaximumFractionDigits,
+    Select,
+}
+
 /// Observable boundaries in `Intl.Collator` construction and locale filtering.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -2021,6 +2053,7 @@ pub(crate) enum NativeContinuationKind {
     IntlLocaleList(IntlLocaleListStage),
     IntlLocale(IntlLocaleStage),
     IntlListFormat(IntlListFormatStage),
+    IntlPluralRules(IntlPluralRulesStage),
     IntlCollator(IntlCollatorStage),
     IntlNumberFormat(IntlNumberFormatStage),
     IntlDateTimeFormat(IntlDateTimeFormatStage),
@@ -2250,6 +2283,37 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::PropertyGet(PropertyCallbackMode::IntlListFormat),
+            first: state,
+            second: options,
+        }
+    }
+
+    /// Roots pending PluralRules state across locale-list, option, or value callbacks.
+    #[inline]
+    pub(crate) const fn intl_plural_rules(
+        site: NativeContinuationSite,
+        stage: IntlPluralRulesStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::IntlPluralRules(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots pending PluralRules state while one ordinary option getter executes JavaScript.
+    #[inline]
+    pub(crate) const fn intl_plural_rules_property_get(
+        site: NativeContinuationSite,
+        state: Value,
+        options: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PropertyGet(PropertyCallbackMode::IntlPluralRules),
             first: state,
             second: options,
         }

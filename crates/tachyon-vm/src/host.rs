@@ -589,6 +589,63 @@ pub struct IntlNumberFormatCreation {
     pub backend: Box<dyn IntlNumberFormatBackend>,
 }
 
+/// Cardinal or ordinal rule family selected by `Intl.PluralRules`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlPluralRuleType {
+    #[default]
+    Cardinal,
+    Ordinal,
+}
+
+/// Closed ECMA-402 plural category set in specification order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlPluralCategory {
+    Zero,
+    One,
+    Two,
+    Few,
+    Many,
+    Other,
+}
+
+/// Provider-neutral constructor inputs after all observable option conversion has completed.
+#[derive(Debug, Eq, PartialEq)]
+pub struct IntlPluralRulesRequest {
+    pub locales: Box<[Box<str>]>,
+    pub locale_matcher: IntlLocaleMatcher,
+    pub rule_type: IntlPluralRuleType,
+    pub options: IntlNumberFormatOptions,
+}
+
+/// Resolved scalar slots published by `Intl.PluralRules.prototype.resolvedOptions`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntlPluralRulesResolved {
+    pub locale: Box<str>,
+    pub rule_type: IntlPluralRuleType,
+    pub options: IntlNumberFormatOptions,
+    pub categories: Box<[IntlPluralCategory]>,
+}
+
+/// Opaque compiled plural data retained by one branded PluralRules object.
+pub trait IntlPluralRulesBackend: Send {
+    /// Selects one category after applying the object's digit and notation options.
+    fn select(
+        &self,
+        value: &IntlMathematicalValue,
+    ) -> Result<IntlPluralCategory, HostProviderError>;
+
+    /// Reports only heap backing retained beyond the boxed trait object itself.
+    fn external_memory_bytes(&self) -> usize;
+}
+
+/// One resolved PluralRules snapshot paired with reusable compiled CLDR state.
+pub struct IntlPluralRulesCreation {
+    pub resolved: IntlPluralRulesResolved,
+    pub backend: Box<dyn IntlPluralRulesBackend>,
+}
+
 /// Locale-sensitive width shared by textual date-time fields.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -975,6 +1032,23 @@ pub trait IntlProvider: Send {
 
     /// Filters canonical requested locales using NumberFormat locale data.
     fn number_format_supported_locales(
+        &mut self,
+        _locales: &[Box<str>],
+        _matcher: IntlLocaleMatcher,
+    ) -> Result<Box<[Box<str>]>, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+
+    /// Creates reusable provider-owned plural selection state from converted inputs.
+    fn create_plural_rules(
+        &mut self,
+        _request: IntlPluralRulesRequest,
+    ) -> Result<IntlPluralRulesCreation, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+
+    /// Filters canonical requested locales using plural-rule data availability.
+    fn plural_rules_supported_locales(
         &mut self,
         _locales: &[Box<str>],
         _matcher: IntlLocaleMatcher,
