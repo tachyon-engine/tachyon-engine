@@ -158,7 +158,16 @@ impl Icu4xDateTimeFormatBackend {
         let year_style = self
             .options
             .year
-            .unwrap_or(IntlDateTimeNumericStyle::Numeric);
+            .unwrap_or(if style == Some(IntlDateTimeStyle::Short) {
+                IntlDateTimeNumericStyle::TwoDigit
+            } else {
+                IntlDateTimeNumericStyle::Numeric
+            });
+        let year = if year_style == IntlDateTimeNumericStyle::TwoDigit {
+            civil.year.rem_euclid(100)
+        } else {
+            civil.year
+        };
         if self.locale.starts_with("en-US") {
             self.push_month(output, civil.month, month_style)?;
             output.push(
@@ -183,12 +192,7 @@ impl Icu4xDateTimeFormatBackend {
                     "/"
                 },
             )?;
-            output.push_number(
-                IntlDateTimePartType::Year,
-                civil.year,
-                year_style,
-                &self.digits,
-            )?;
+            output.push_number(IntlDateTimePartType::Year, year, year_style, &self.digits)?;
         } else {
             output.push_number(
                 IntlDateTimePartType::Day,
@@ -199,12 +203,7 @@ impl Icu4xDateTimeFormatBackend {
             output.push(IntlDateTimePartType::Literal, "/")?;
             self.push_month(output, civil.month, month_style)?;
             output.push(IntlDateTimePartType::Literal, "/")?;
-            output.push_number(
-                IntlDateTimePartType::Year,
-                civil.year,
-                year_style,
-                &self.digits,
-            )?;
+            output.push_number(IntlDateTimePartType::Year, year, year_style, &self.digits)?;
         }
         if self.options.era.is_some() || civil.year <= 0 {
             output.push(IntlDateTimePartType::Literal, " ")?;
@@ -295,7 +294,12 @@ impl Icu4xDateTimeFormatBackend {
                 if civil.hour < 12 { "AM" } else { "PM" },
             )?;
         }
-        if let Some(style) = self.options.time_zone_name {
+        let time_zone_name = self.options.time_zone_name.or(match style {
+            Some(IntlDateTimeStyle::Full) => Some(IntlDateTimeZoneNameStyle::Long),
+            Some(IntlDateTimeStyle::Long) => Some(IntlDateTimeZoneNameStyle::Short),
+            _ => None,
+        });
+        if let Some(style) = time_zone_name {
             output.push(IntlDateTimePartType::Literal, " ")?;
             let label = time_zone_label(&self.time_zone, style, offset_milliseconds);
             output.push(IntlDateTimePartType::TimeZoneName, &label)?;
@@ -782,7 +786,11 @@ fn time_zone_label(
         IntlDateTimeZoneNameStyle::ShortOffset | IntlDateTimeZoneNameStyle::LongOffset
     ) {
         return if time_zone.eq_ignore_ascii_case("UTC") {
-            "UTC".to_owned()
+            if style == IntlDateTimeZoneNameStyle::Long {
+                "Coordinated Universal Time".to_owned()
+            } else {
+                "UTC".to_owned()
+            }
         } else {
             time_zone.to_owned()
         };
@@ -1031,5 +1039,39 @@ mod tests {
             })
             .unwrap();
         assert_eq!(String::from_utf16(&formatted).unwrap(), "12 n");
+    }
+
+    #[test]
+    /// Covers style-implied two-digit years and full UTC zone-name emission.
+    fn formats_short_date_and_long_utc_time_style_defaults() {
+        let short_date = create(
+            "en-US",
+            request(IntlDateTimeFormatOptions {
+                date_style: Some(IntlDateTimeStyle::Short),
+                ..IntlDateTimeFormatOptions::default()
+            }),
+        )
+        .unwrap();
+        let input = IntlDateTimeInput {
+            utc_milliseconds: 0,
+            offset_milliseconds: 0,
+        };
+        assert_eq!(
+            String::from_utf16(&short_date.backend.format(input).unwrap()).unwrap(),
+            "1/1/70"
+        );
+
+        let full_time = create(
+            "en-US",
+            request(IntlDateTimeFormatOptions {
+                time_style: Some(IntlDateTimeStyle::Full),
+                ..IntlDateTimeFormatOptions::default()
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf16(&full_time.backend.format(input).unwrap()).unwrap(),
+            "12:00:00 AM Coordinated Universal Time"
+        );
     }
 }
