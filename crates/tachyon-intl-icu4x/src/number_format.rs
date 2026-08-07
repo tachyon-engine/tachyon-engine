@@ -684,6 +684,12 @@ struct LoadedDecimalData {
     infinity_symbol: Box<str>,
 }
 
+/// Minimal decimal symbols reused by DateTimeFormat numeric field emission.
+pub(super) struct DateTimeDecimalData {
+    pub(super) digits: [char; 10],
+    pub(super) decimal_separator: Box<str>,
+}
+
 /// Expands the bounded exponent syntax emitted by ECMAScript Number::toString without f64 loss.
 fn parse_mathematical_decimal(value: &str) -> Result<Decimal, HostProviderError> {
     if let Ok(decimal) = Decimal::from_str(value) {
@@ -921,7 +927,7 @@ fn load_decimal_data(
     let symbols = symbols_response.payload.get();
     let (minus_prefix, minus_suffix) = symbols.minus_sign_affixes();
     let (plus_prefix, plus_suffix) = symbols.plus_sign_affixes();
-    let loaded = LoadedDecimalData {
+    let mut loaded = LoadedDecimalData {
         digits: ['0'; 10],
         minus_prefix: minus_prefix.into(),
         minus_suffix: minus_suffix.into(),
@@ -957,7 +963,23 @@ fn load_decimal_data(
     )
     .map(|response| *response.payload.get())
     .or_else(|_| simple_numbering_system_digits(numbering_system).ok_or(DATA_FAILURE))?;
+    if matches!(numbering_system, "arab" | "arabext") {
+        loaded.decimal_separator = "٫".into();
+        loaded.grouping_separator = "٬".into();
+    }
     Ok(LoadedDecimalData { digits, ..loaded })
+}
+
+/// Copies numbering-system digits and the decimal separator for DateTimeFormat construction.
+pub(super) fn load_date_time_decimal_data(
+    locale: &Locale,
+    numbering_system: &str,
+) -> Result<DateTimeDecimalData, HostProviderError> {
+    let loaded = load_decimal_data(locale, numbering_system)?;
+    Ok(DateTimeDecimalData {
+        digits: loaded.digits,
+        decimal_separator: loaded.decimal_separator,
+    })
 }
 
 /// Maps bare languages to the compiled decimal data package's default regional locale.

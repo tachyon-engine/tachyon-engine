@@ -47,7 +47,7 @@ fn supported_time_zones() -> Box<[Box<str>]> {
 }
 
 /// Calendars required by the current ECMA-402 calendar table, excluding aliases.
-const CALENDARS: &[&str] = &[
+pub(super) const CALENDARS: &[&str] = &[
     "buddhist",
     "chinese",
     "coptic",

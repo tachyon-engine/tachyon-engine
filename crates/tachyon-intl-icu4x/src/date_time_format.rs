@@ -12,7 +12,11 @@ use tachyon_vm::{
     IntlDateTimeZoneNameStyle, IntlFormattedDateTimeParts, IntlLocaleMatcher,
 };
 
-use crate::tuning::{DATE_TIME_INITIAL_CODE_UNITS, DATE_TIME_INITIAL_PARTS};
+use crate::{
+    number_format::load_date_time_decimal_data,
+    supported_values::{CALENDARS, NUMBERING_SYSTEMS},
+    tuning::{DATE_TIME_INITIAL_CODE_UNITS, DATE_TIME_INITIAL_PARTS},
+};
 
 const DATA_FAILURE: HostProviderError = HostProviderError::Failure(3);
 const MILLIS_PER_DAY: i64 = 86_400_000;
@@ -25,6 +29,8 @@ struct Icu4xDateTimeFormatBackend {
     locale: Box<str>,
     calendar: Box<str>,
     numbering_system: Box<str>,
+    digits: [char; 10],
+    decimal_separator: Box<str>,
     time_zone: Box<str>,
     hour_cycle: IntlDateTimeHourCycle,
     options: IntlDateTimeFormatOptions,
@@ -71,7 +77,11 @@ impl IntlDateTimeFormatBackend for Icu4xDateTimeFormatBackend {
 
     #[inline(always)]
     fn external_memory_bytes(&self) -> usize {
-        self.locale.len() + self.calendar.len() + self.numbering_system.len() + self.time_zone.len()
+        self.locale.len()
+            + self.calendar.len()
+            + self.numbering_system.len()
+            + self.decimal_separator.len()
+            + self.time_zone.len()
     }
 }
 
@@ -159,7 +169,12 @@ impl Icu4xDateTimeFormatBackend {
                     "/"
                 },
             )?;
-            output.push_number(IntlDateTimePartType::Day, i64::from(civil.day), day_style)?;
+            output.push_number(
+                IntlDateTimePartType::Day,
+                i64::from(civil.day),
+                day_style,
+                &self.digits,
+            )?;
             output.push(
                 IntlDateTimePartType::Literal,
                 if month_style_is_text(month_style) {
@@ -168,13 +183,28 @@ impl Icu4xDateTimeFormatBackend {
                     "/"
                 },
             )?;
-            output.push_number(IntlDateTimePartType::Year, civil.year, year_style)?;
+            output.push_number(
+                IntlDateTimePartType::Year,
+                civil.year,
+                year_style,
+                &self.digits,
+            )?;
         } else {
-            output.push_number(IntlDateTimePartType::Day, i64::from(civil.day), day_style)?;
+            output.push_number(
+                IntlDateTimePartType::Day,
+                i64::from(civil.day),
+                day_style,
+                &self.digits,
+            )?;
             output.push(IntlDateTimePartType::Literal, "/")?;
             self.push_month(output, civil.month, month_style)?;
             output.push(IntlDateTimePartType::Literal, "/")?;
-            output.push_number(IntlDateTimePartType::Year, civil.year, year_style)?;
+            output.push_number(
+                IntlDateTimePartType::Year,
+                civil.year,
+                year_style,
+                &self.digits,
+            )?;
         }
         if self.options.era.is_some() || civil.year <= 0 {
             output.push(IntlDateTimePartType::Literal, " ")?;
@@ -213,6 +243,7 @@ impl Icu4xDateTimeFormatBackend {
                 self.options
                     .hour
                     .unwrap_or(IntlDateTimeNumericStyle::Numeric),
+                &self.digits,
             )?;
         }
         if include_minute {
@@ -223,6 +254,7 @@ impl Icu4xDateTimeFormatBackend {
                 IntlDateTimePartType::Minute,
                 i64::from(civil.minute),
                 IntlDateTimeNumericStyle::TwoDigit,
+                &self.digits,
             )?;
         }
         if include_second {
@@ -231,6 +263,7 @@ impl Icu4xDateTimeFormatBackend {
                 IntlDateTimePartType::Second,
                 i64::from(civil.second),
                 IntlDateTimeNumericStyle::TwoDigit,
+                &self.digits,
             )?;
         }
         if let Some(digits) = self.options.fractional_second_digits {
@@ -239,11 +272,12 @@ impl Icu4xDateTimeFormatBackend {
                 2 => 10,
                 _ => 1,
             };
-            output.push(IntlDateTimePartType::Literal, ".")?;
-            output.push_ascii_number(
+            output.push(IntlDateTimePartType::Literal, &self.decimal_separator)?;
+            output.push_localized_number(
                 IntlDateTimePartType::FractionalSecond,
                 i64::from(civil.millisecond) / divisor,
                 usize::from(digits),
+                &self.digits,
             )?;
         }
         if hour12 && include_hour {
@@ -272,11 +306,13 @@ impl Icu4xDateTimeFormatBackend {
                 IntlDateTimePartType::Month,
                 i64::from(month),
                 IntlDateTimeNumericStyle::Numeric,
+                &self.digits,
             ),
             IntlDateTimeMonthStyle::TwoDigit => output.push_number(
                 IntlDateTimePartType::Month,
                 i64::from(month),
                 IntlDateTimeNumericStyle::TwoDigit,
+                &self.digits,
             ),
             IntlDateTimeMonthStyle::Long => output.push(
                 IntlDateTimePartType::Month,
@@ -328,23 +364,44 @@ impl RenderedDateTime {
         kind: IntlDateTimePartType,
         value: i64,
         style: IntlDateTimeNumericStyle,
+        digits: &[char; 10],
     ) -> Result<(), HostProviderError> {
         let width = usize::from(style == IntlDateTimeNumericStyle::TwoDigit) + 1;
-        self.push_ascii_number(kind, value, width)
+        self.push_localized_number(kind, value, width, digits)
     }
 
-    fn push_ascii_number(
+    /// Formats an integer to the requested width and substitutes the resolved decimal digits.
+    fn push_localized_number(
         &mut self,
         kind: IntlDateTimePartType,
         value: i64,
         width: usize,
+        digits: &[char; 10],
     ) -> Result<(), HostProviderError> {
         let text = if width == 1 {
             value.to_string()
         } else {
             format!("{value:0width$}")
         };
-        self.push(kind, &text)
+        let start = u32::try_from(self.formatted.len()).map_err(|_| DATA_FAILURE)?;
+        self.formatted
+            .try_reserve(text.len().saturating_mul(2))
+            .map_err(|_| DATA_FAILURE)?;
+        for byte in text.bytes() {
+            if byte.is_ascii_digit() {
+                let digit = digits[usize::from(byte - b'0')];
+                let mut encoded = [0_u16; 2];
+                self.formatted
+                    .extend_from_slice(digit.encode_utf16(&mut encoded));
+            } else {
+                self.formatted.push(u16::from(byte));
+            }
+        }
+        let end = u32::try_from(self.formatted.len()).map_err(|_| DATA_FAILURE)?;
+        if let Some(spans) = &mut self.spans {
+            spans.push(IntlDateTimePartSpan { kind, start, end });
+        }
+        Ok(())
     }
 }
 
@@ -359,11 +416,28 @@ pub(super) fn create(
         .find_map(|locale| match_locale(locale))
         .or_else(|| match_locale(default_locale))
         .ok_or(DATA_FAILURE)?;
-    let calendar = request.calendar.take().unwrap_or_else(|| "gregory".into());
-    let numbering_system = request
+    let extension_calendar = unicode_keyword(&matched.requested, "ca");
+    let option_calendar = request
+        .calendar
+        .take()
+        .map(|calendar| canonicalize_calendar_identifier(&calendar));
+    let calendar = resolve_supported_keyword(
+        option_calendar.as_deref(),
+        extension_calendar.as_deref(),
+        CALENDARS,
+        "gregory",
+    );
+    let extension_numbering_system = unicode_keyword(&matched.requested, "nu");
+    let option_numbering_system = request
         .numbering_system
         .take()
-        .unwrap_or_else(|| "latn".into());
+        .map(|numbering_system| numbering_system.to_ascii_lowercase().into_boxed_str());
+    let numbering_system = resolve_supported_keyword(
+        option_numbering_system.as_deref(),
+        extension_numbering_system.as_deref(),
+        NUMBERING_SYSTEMS,
+        "latn",
+    );
     let extension_hour_cycle = unicode_keyword(&matched.requested, "hc")
         .as_deref()
         .and_then(parse_hour_cycle);
@@ -377,6 +451,12 @@ pub(super) fn create(
             .unwrap_or(locale_hour_cycle),
     };
     let mut resolved_locale = matched.data_locale.clone();
+    if extension_calendar.as_deref() == Some(calendar.as_ref()) {
+        set_unicode_keyword(&mut resolved_locale, "ca", &calendar)?;
+    }
+    if extension_numbering_system.as_deref() == Some(numbering_system.as_ref()) {
+        set_unicode_keyword(&mut resolved_locale, "nu", &numbering_system)?;
+    }
     if request.hour12.is_none()
         && extension_hour_cycle == Some(hour_cycle)
         && request.hour_cycle.is_none_or(|option| option == hour_cycle)
@@ -391,6 +471,7 @@ pub(super) fn create(
         request.options.month = Some(IntlDateTimeMonthStyle::Numeric);
         request.options.day = Some(IntlDateTimeNumericStyle::Numeric);
     }
+    let decimal_data = load_date_time_decimal_data(&matched.data_locale, &numbering_system)?;
     let resolved = IntlDateTimeFormatResolved {
         locale: resolved_locale.to_string().into_boxed_str(),
         calendar: calendar.clone(),
@@ -405,6 +486,8 @@ pub(super) fn create(
             locale: matched.data_locale.to_string().into_boxed_str(),
             calendar,
             numbering_system,
+            digits: decimal_data.digits,
+            decimal_separator: decimal_data.decimal_separator,
             time_zone: request.time_zone,
             hour_cycle,
             options: request.options,
@@ -437,6 +520,28 @@ fn match_locale(locale: &str) -> Option<MatchedLocale> {
         requested,
         data_locale,
     })
+}
+
+fn canonicalize_calendar_identifier(calendar: &str) -> Box<str> {
+    let calendar = calendar.to_ascii_lowercase();
+    if calendar == "islamicc" {
+        "islamic-civil".into()
+    } else {
+        calendar.into_boxed_str()
+    }
+}
+
+fn resolve_supported_keyword(
+    option: Option<&str>,
+    extension: Option<&str>,
+    supported: &[&str],
+    default: &str,
+) -> Box<str> {
+    option
+        .filter(|value| supported.binary_search(value).is_ok())
+        .or_else(|| extension.filter(|value| supported.binary_search(value).is_ok()))
+        .unwrap_or(default)
+        .into()
 }
 
 fn unicode_keyword(locale: &Locale, key: &str) -> Option<Box<str>> {
@@ -787,5 +892,64 @@ mod tests {
             create("en-US", hour24).unwrap().resolved.hour_cycle,
             Some(IntlDateTimeHourCycle::H23)
         );
+    }
+
+    #[test]
+    /// Covers supported/unsupported option precedence and calendar option canonicalization.
+    fn resolves_calendar_and_numbering_system_unicode_extensions() {
+        let mut extension_calendar =
+            request_for("en-u-ca-iso8601", IntlDateTimeFormatOptions::default());
+        extension_calendar.calendar = Some("invalid".into());
+        let extension_calendar = create("en-US", extension_calendar).unwrap().resolved;
+        assert_eq!(extension_calendar.locale.as_ref(), "en-u-ca-iso8601");
+        assert_eq!(extension_calendar.calendar.as_ref(), "iso8601");
+
+        let mut option_calendar =
+            request_for("en-u-ca-gregory", IntlDateTimeFormatOptions::default());
+        option_calendar.calendar = Some("ISO8601".into());
+        let option_calendar = create("en-US", option_calendar).unwrap().resolved;
+        assert_eq!(option_calendar.locale.as_ref(), "en");
+        assert_eq!(option_calendar.calendar.as_ref(), "iso8601");
+
+        let mut alias = request(IntlDateTimeFormatOptions::default());
+        alias.calendar = Some("islamicc".into());
+        assert_eq!(
+            create("en-US", alias).unwrap().resolved.calendar.as_ref(),
+            "islamic-civil"
+        );
+
+        let mut extension_numbering =
+            request_for("en-u-nu-arab", IntlDateTimeFormatOptions::default());
+        extension_numbering.numbering_system = Some("invalid".into());
+        let extension_numbering = create("en-US", extension_numbering).unwrap().resolved;
+        assert_eq!(extension_numbering.locale.as_ref(), "en-u-nu-arab");
+        assert_eq!(extension_numbering.numbering_system.as_ref(), "arab");
+
+        let mut option_numbering =
+            request_for("en-u-nu-latn", IntlDateTimeFormatOptions::default());
+        option_numbering.numbering_system = Some("ARAB".into());
+        let option_numbering = create("en-US", option_numbering).unwrap().resolved;
+        assert_eq!(option_numbering.locale.as_ref(), "en");
+        assert_eq!(option_numbering.numbering_system.as_ref(), "arab");
+    }
+
+    #[test]
+    fn formats_date_time_fields_with_resolved_numbering_system() {
+        let options = IntlDateTimeFormatOptions {
+            hour: Some(IntlDateTimeNumericStyle::Numeric),
+            minute: Some(IntlDateTimeNumericStyle::Numeric),
+            second: Some(IntlDateTimeNumericStyle::Numeric),
+            fractional_second_digits: Some(3),
+            ..IntlDateTimeFormatOptions::default()
+        };
+        let creation = create("en-US", request_for("en-US-u-nu-arab", options)).unwrap();
+        let formatted = creation
+            .backend
+            .format(IntlDateTimeInput {
+                utc_milliseconds: 9_306_789,
+                offset_milliseconds: 0,
+            })
+            .unwrap();
+        assert_eq!(String::from_utf16(&formatted).unwrap(), "٢:٣٥:٠٦٫٧٨٩ AM");
     }
 }
