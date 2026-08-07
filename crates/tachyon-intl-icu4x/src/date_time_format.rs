@@ -280,7 +280,15 @@ impl Icu4xDateTimeFormatBackend {
                 &self.digits,
             )?;
         }
-        if hour12 && include_hour {
+        if let Some(style) = self.options.day_period {
+            if include_hour {
+                output.push(IntlDateTimePartType::Literal, " ")?;
+            }
+            output.push(
+                IntlDateTimePartType::DayPeriod,
+                flexible_day_period(&self.locale, civil, style),
+            )?;
+        } else if hour12 && include_hour {
             output.push(IntlDateTimePartType::Literal, " ")?;
             output.push(
                 IntlDateTimePartType::DayPeriod,
@@ -727,6 +735,27 @@ fn weekday_name(
     }
 }
 
+/// Returns the CLDR English flexible day-period label used by the pinned release data.
+fn flexible_day_period(
+    locale: &str,
+    civil: CivilDateTime,
+    style: IntlDateTimeTextStyle,
+) -> &'static str {
+    if locale != "en" && !locale.starts_with("en-") {
+        return if civil.hour < 12 { "AM" } else { "PM" };
+    }
+    let exact_noon =
+        civil.hour == 12 && civil.minute == 0 && civil.second == 0 && civil.millisecond == 0;
+    match civil.hour {
+        6..=11 => "in the morning",
+        12 if exact_noon && style == IntlDateTimeTextStyle::Narrow => "n",
+        12 if exact_noon => "noon",
+        12..=17 => "in the afternoon",
+        18..=20 => "in the evening",
+        _ => "at night",
+    }
+}
+
 #[inline(always)]
 fn has_any_component(options: &IntlDateTimeFormatOptions) -> bool {
     options.weekday.is_some()
@@ -952,5 +981,55 @@ mod tests {
             })
             .unwrap();
         assert_eq!(String::from_utf16(&formatted).unwrap(), "٢:٣٥:٠٦٫٧٨٩ AM");
+    }
+
+    #[test]
+    /// Covers every English transition plus exact-noon and narrow-width behavior.
+    fn formats_english_flexible_day_period_boundaries() {
+        let options = IntlDateTimeFormatOptions {
+            day_period: Some(IntlDateTimeTextStyle::Long),
+            ..IntlDateTimeFormatOptions::default()
+        };
+        let creation = create("en-US", request_for("en", options)).unwrap();
+        for (hour, expected) in [
+            (0, "at night"),
+            (6, "in the morning"),
+            (12, "noon"),
+            (13, "in the afternoon"),
+            (18, "in the evening"),
+            (21, "at night"),
+        ] {
+            let formatted = creation
+                .backend
+                .format(IntlDateTimeInput {
+                    utc_milliseconds: i64::from(hour) * MILLIS_PER_HOUR,
+                    offset_milliseconds: 0,
+                })
+                .unwrap();
+            assert_eq!(String::from_utf16(&formatted).unwrap(), expected);
+        }
+        let afternoon = creation
+            .backend
+            .format(IntlDateTimeInput {
+                utc_milliseconds: 12 * MILLIS_PER_HOUR + 30 * MILLIS_PER_MINUTE,
+                offset_milliseconds: 0,
+            })
+            .unwrap();
+        assert_eq!(String::from_utf16(&afternoon).unwrap(), "in the afternoon");
+
+        let options = IntlDateTimeFormatOptions {
+            day_period: Some(IntlDateTimeTextStyle::Narrow),
+            hour: Some(IntlDateTimeNumericStyle::Numeric),
+            ..IntlDateTimeFormatOptions::default()
+        };
+        let creation = create("en-US", request_for("en", options)).unwrap();
+        let formatted = creation
+            .backend
+            .format(IntlDateTimeInput {
+                utc_milliseconds: 12 * MILLIS_PER_HOUR,
+                offset_milliseconds: 0,
+            })
+            .unwrap();
+        assert_eq!(String::from_utf16(&formatted).unwrap(), "12 n");
     }
 }
