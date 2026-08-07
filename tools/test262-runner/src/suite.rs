@@ -41,7 +41,7 @@ impl Default for RunOptions {
         Self {
             selector: None,
             filter: None,
-            parallel: true,
+            parallel: false,
             seed: None,
             verify_commit: true,
         }
