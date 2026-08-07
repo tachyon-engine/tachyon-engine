@@ -5,6 +5,31 @@ use crate::runtime::fiber::IntlDateTimeFormatStage;
 
 const UNDEFINED: Value = Value::from_immediate(Immediate::Undefined);
 
+/// Selects the `ToDateTimeOptions` required/default field groups for one Date locale method.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DateTimeLocaleKind {
+    Any,
+    Date,
+    Time,
+}
+
+/// Determines whether the pending pipeline constructs a JS formatter or directly formats a Date.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum IntlDateTimeFormatCompletion {
+    Constructor,
+    DateToLocale {
+        kind: DateTimeLocaleKind,
+        milliseconds: i64,
+    },
+}
+
+/// Distinguishes the observable `ToDateTimeOptions` scan from formatter option conversion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlDateTimeFormatPhase {
+    ToDateTimeOptions,
+    Initialize,
+}
+
 /// GC-managed constructor state retained across option getters and primitive conversions.
 #[derive(Clone, Debug)]
 pub(crate) struct PendingIntlDateTimeFormat {
@@ -20,6 +45,11 @@ pub(crate) struct PendingIntlDateTimeFormat {
     hour12: Option<bool>,
     fields: IntlDateTimeFormatOptions,
     stage: IntlDateTimeFormatStage,
+    completion: IntlDateTimeFormatCompletion,
+    phase: IntlDateTimeFormatPhase,
+    needs_defaults: bool,
+    date_style_present: bool,
+    time_style_present: bool,
 }
 
 impl Trace for PendingIntlDateTimeFormat {
@@ -49,7 +79,12 @@ impl Trace for PendingIntlDateTimeFormatRoots<'_> {
 }
 
 impl PendingIntlDateTimeFormat {
-    fn new(new_target: Value, options: Value, locales: Value) -> Self {
+    fn new(
+        new_target: Value,
+        options: Value,
+        locales: Value,
+        completion: IntlDateTimeFormatCompletion,
+    ) -> Self {
         Self {
             new_target,
             legacy_receiver: UNDEFINED,
@@ -63,6 +98,11 @@ impl PendingIntlDateTimeFormat {
             hour12: None,
             fields: IntlDateTimeFormatOptions::default(),
             stage: IntlDateTimeFormatStage::LocaleMatcher,
+            completion,
+            phase: IntlDateTimeFormatPhase::Initialize,
+            needs_defaults: true,
+            date_style_present: false,
+            time_style_present: false,
         }
     }
 }
@@ -88,7 +128,12 @@ impl Isolate {
         } else {
             self.coerce_to_object(options)?
         };
-        let mut pending = PendingIntlDateTimeFormat::new(new_target, options, locales);
+        let mut pending = PendingIntlDateTimeFormat::new(
+            new_target,
+            options,
+            locales,
+            IntlDateTimeFormatCompletion::Constructor,
+        );
         if called_without_new {
             pending.legacy_receiver = site.this_value;
         }
@@ -103,6 +148,43 @@ impl Isolate {
         )
     }
 
+    /// Applies `ToDateTimeOptions` before formatting one genuine finite Date payload.
+    pub(crate) fn begin_date_to_locale(
+        &mut self,
+        site: &CallSite,
+        kind: DateTimeLocaleKind,
+    ) -> Result<(), ExecutionError> {
+        let date_value = self
+            .date_time_value(site.this_value)?
+            .ok_or(ExecutionError::NotObject(site.this_value))?;
+        if date_value.is_nan() {
+            let value = self.date_to_string(site.this_value)?;
+            return self.write(site.caller_base, site.destination, value);
+        }
+        let locales = self.call_argument(site, 0)?.unwrap_or(UNDEFINED);
+        let options = self.call_argument(site, 1)?.unwrap_or(UNDEFINED);
+        let locales = self.intl_date_time_locale_list(locales)?;
+        let locales = self.materialize_intl_date_time_locale_list(locales)?;
+        self.write(site.caller_base, site.destination, locales)?;
+        let options_prototype = if options == UNDEFINED {
+            Value::from_immediate(Immediate::Null)
+        } else {
+            self.coerce_to_object(options)?
+        };
+        let options = self.create_ordinary_object_with_prototype(options_prototype)?;
+        let locales = self.read(site.caller_base, site.destination)?;
+        let completion = IntlDateTimeFormatCompletion::DateToLocale {
+            kind,
+            milliseconds: date_value as i64,
+        };
+        let mut pending = PendingIntlDateTimeFormat::new(UNDEFINED, options, locales, completion);
+        pending.phase = IntlDateTimeFormatPhase::ToDateTimeOptions;
+        pending.stage = first_to_date_time_options_stage(kind);
+        let stage = pending.stage;
+        let state = self.allocate_pending_intl_date_time_format(pending)?;
+        self.dispatch_intl_date_time_format_option_get(Self::native_site(site), state, stage)
+    }
+
     /// Resumes one option Get, preserving undefined and selecting the exact coercion hint.
     pub(crate) fn resume_pending_intl_date_time_format(
         &mut self,
@@ -111,6 +193,11 @@ impl Isolate {
         value: Value,
     ) -> Result<(), ExecutionError> {
         let state = self.pending_intl_date_time_format_reference(continuation.first())?;
+        if self.pending_intl_date_time_format_snapshot(state)?.phase
+            == IntlDateTimeFormatPhase::ToDateTimeOptions
+        {
+            return self.resume_to_date_time_options(continuation.site(), state, stage, value);
+        }
         if value == UNDEFINED {
             return self.advance_intl_date_time_format_option(continuation.site(), state, stage);
         }
@@ -137,6 +224,117 @@ impl Isolate {
             );
         }
         self.resume_intl_date_time_format_option_primitive(continuation.site(), state, value)
+    }
+
+    /// Records presence without coercion during the first `ToDateTimeOptions` property scan.
+    fn resume_to_date_time_options(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingIntlDateTimeFormat>,
+        stage: IntlDateTimeFormatStage,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        if value != UNDEFINED {
+            self.update_pending_intl_date_time_format(state, |pending| {
+                pending.needs_defaults = false;
+                if stage == IntlDateTimeFormatStage::DateStyle {
+                    pending.date_style_present = true;
+                } else if stage == IntlDateTimeFormatStage::TimeStyle {
+                    pending.time_style_present = true;
+                }
+            })?;
+        }
+        let snapshot = self.pending_intl_date_time_format_snapshot(state)?;
+        let IntlDateTimeFormatCompletion::DateToLocale { kind, .. } = snapshot.completion else {
+            return Err(ExecutionError::MissingNativeContinuation);
+        };
+        if let Some(next) = next_to_date_time_options_stage(kind, stage) {
+            return self.dispatch_intl_date_time_format_option_get(site, state, next);
+        }
+        self.finish_to_date_time_options(site, state)
+    }
+
+    /// Enforces style restrictions, injects own numeric defaults, then restarts initialization.
+    fn finish_to_date_time_options(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingIntlDateTimeFormat>,
+    ) -> Result<(), ExecutionError> {
+        let snapshot = self.pending_intl_date_time_format_snapshot(state)?;
+        let IntlDateTimeFormatCompletion::DateToLocale { kind, .. } = snapshot.completion else {
+            return Err(ExecutionError::MissingNativeContinuation);
+        };
+        if (kind == DateTimeLocaleKind::Date && snapshot.time_style_present)
+            || (kind == DateTimeLocaleKind::Time && snapshot.date_style_present)
+        {
+            return Err(ExecutionError::IntlDateTimeFormatStyleConflict);
+        }
+        let root = NativeContinuation::intl_date_time_format(
+            site,
+            IntlDateTimeFormatStage::LocaleMatcher,
+            Value::from_heap_ref(state.raw()),
+            snapshot.options,
+        );
+        self.fiber
+            .completions
+            .push_native(root)
+            .map_err(Self::completion_stack_error)?;
+        if snapshot.needs_defaults {
+            let defaults = self.allocate_runtime_string_retaining(
+                JsString::try_from_latin1(b"numeric").map_err(ExecutionError::PropertyKeyString)?,
+                snapshot.options,
+            );
+            let defaults = defaults.and_then(|(numeric, options)| {
+                if kind != DateTimeLocaleKind::Time {
+                    self.set_date_time_numeric_defaults(
+                        options,
+                        numeric,
+                        &[b"year".as_slice(), b"month".as_slice(), b"day".as_slice()],
+                    )?;
+                }
+                if kind != DateTimeLocaleKind::Date {
+                    self.set_date_time_numeric_defaults(
+                        options,
+                        numeric,
+                        &[
+                            b"hour".as_slice(),
+                            b"minute".as_slice(),
+                            b"second".as_slice(),
+                        ],
+                    )?;
+                }
+                Ok(())
+            });
+            if let Err(error) = defaults {
+                self.pop_native_continuation()?;
+                return Err(error);
+            }
+        }
+        let root = self.pop_native_continuation()?;
+        let state = self.pending_intl_date_time_format_reference(root.first())?;
+        self.update_pending_intl_date_time_format(state, |pending| {
+            pending.phase = IntlDateTimeFormatPhase::Initialize;
+            pending.stage = IntlDateTimeFormatStage::LocaleMatcher;
+        })?;
+        self.dispatch_intl_date_time_format_option_get(
+            site,
+            state,
+            IntlDateTimeFormatStage::LocaleMatcher,
+        )
+    }
+
+    /// Defines one small fixed group of ordinary writable/enumerable/configurable defaults.
+    fn set_date_time_numeric_defaults(
+        &mut self,
+        options: Value,
+        numeric: Value,
+        names: &[&[u8]],
+    ) -> Result<(), ExecutionError> {
+        for name in names {
+            let key = self.intern_intrinsic_name(name)?;
+            self.set_own_data_property(options, key, numeric)?;
+        }
+        Ok(())
     }
 
     /// Continues after an option object's number- or string-hint ToPrimitive callback.
@@ -356,12 +554,18 @@ impl Isolate {
             time_zone: self.optional_intl_date_time_format_string(snapshot.time_zone)?,
             options: snapshot.fields,
         };
-        self.finish_intl_date_time_format_constructor(
-            site,
-            snapshot.new_target,
-            snapshot.legacy_receiver,
-            request,
-        )
+        match snapshot.completion {
+            IntlDateTimeFormatCompletion::Constructor => self
+                .finish_intl_date_time_format_constructor(
+                    site,
+                    snapshot.new_target,
+                    snapshot.legacy_receiver,
+                    request,
+                ),
+            IntlDateTimeFormatCompletion::DateToLocale { milliseconds, .. } => {
+                self.finish_intl_date_to_locale(site, milliseconds, request)
+            }
+        }
     }
 
     /// Stores canonical locale strings in a private intrinsic Array rooted across option callbacks.
@@ -563,6 +767,39 @@ impl Isolate {
         };
         self.resume_pending_intl_date_time_format(continuation, stage, value)
     }
+}
+
+#[inline(always)]
+const fn first_to_date_time_options_stage(kind: DateTimeLocaleKind) -> IntlDateTimeFormatStage {
+    match kind {
+        DateTimeLocaleKind::Any | DateTimeLocaleKind::Date => IntlDateTimeFormatStage::Weekday,
+        DateTimeLocaleKind::Time => IntlDateTimeFormatStage::DayPeriod,
+    }
+}
+
+#[inline(always)]
+const fn next_to_date_time_options_stage(
+    kind: DateTimeLocaleKind,
+    stage: IntlDateTimeFormatStage,
+) -> Option<IntlDateTimeFormatStage> {
+    use IntlDateTimeFormatStage as S;
+    Some(match stage {
+        S::Weekday => S::Year,
+        S::Year => S::Month,
+        S::Month => S::Day,
+        S::Day => match kind {
+            DateTimeLocaleKind::Any => S::DayPeriod,
+            DateTimeLocaleKind::Date | DateTimeLocaleKind::Time => S::DateStyle,
+        },
+        S::DayPeriod => S::Hour,
+        S::Hour => S::Minute,
+        S::Minute => S::Second,
+        S::Second => S::FractionalSecondDigits,
+        S::FractionalSecondDigits => S::DateStyle,
+        S::DateStyle => S::TimeStyle,
+        S::TimeStyle => return None,
+        _ => return None,
+    })
 }
 
 #[inline(always)]

@@ -58,6 +58,37 @@ try {
 } catch (error) {
   emptyTimeZoneRejected = error instanceof RangeError;
 }
+let localeOptionGets = 0;
+const localeOptions = new Proxy({
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit"
+}, {
+  get(target, key) {
+    localeOptionGets += 1;
+    return target[key];
+  }
+});
+const localeString = new Date(0).toLocaleString("en-US", localeOptions);
+const localeDateString = new Date(0).toLocaleDateString("en-US");
+const localeTimeString = new Date(0).toLocaleTimeString("en-US");
+let localeAbruptIdentity = false;
+try {
+  new Date(0).toLocaleTimeString("en-US", new Proxy({}, {
+    get(target, key) {
+      if (key === "hour") throw marker;
+      return target[key];
+    }
+  }));
+} catch (error) {
+  localeAbruptIdentity = error === marker;
+}
+let localeStyleConflict = false;
+try {
+  new Date(0).toLocaleDateString("en-US", { timeStyle: "short" });
+} catch (error) {
+  localeStyleConflict = error instanceof TypeError;
+}
 resolved.locale === "en-US" && resolved.calendar === "gregory" &&
 resolved.numberingSystem === "latn" && resolved.timeZone === "UTC" &&
 resolved.year === "numeric" && resolved.month === "2-digit" &&
@@ -76,7 +107,11 @@ legacySymbol.description === "IntlLegacyConstructedSymbol" &&
 legacyDescriptor.writable === false && legacyDescriptor.enumerable === false &&
 legacyDescriptor.configurable === false && legacyResolved.year === "numeric" &&
 legacyFormat(0) === "01/01/1970" && proxyResolved.year === "numeric" &&
-seenLegacySymbol === legacySymbol && emptyTimeZoneRejected
+seenLegacySymbol === legacySymbol && emptyTimeZoneRejected &&
+localeString === "01/01/1970" && localeDateString === "01/01/1970" &&
+localeTimeString === "01/01/1970" && localeOptionGets === 31 &&
+localeAbruptIdentity && localeStyleConflict &&
+new Date(NaN).toLocaleString("not-a-locale", localeOptions) === "Invalid Date"
 "#;
 
 struct TestDateTimeBackend;

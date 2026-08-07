@@ -4,7 +4,7 @@ use super::super::*;
 use crate::runtime::fiber::IntlDateTimeFormatLegacyStage;
 
 mod options;
-pub(crate) use options::PendingIntlDateTimeFormat;
+pub(crate) use options::{DateTimeLocaleKind, PendingIntlDateTimeFormat};
 mod legacy;
 
 const MAX_TIME_VALUE: f64 = 8.64e15;
@@ -62,24 +62,9 @@ impl Isolate {
         site: NativeContinuationSite,
         new_target: Value,
         legacy_receiver: Value,
-        mut request: IntlDateTimeFormatRequest,
+        request: IntlDateTimeFormatRequest,
     ) -> Result<(), ExecutionError> {
-        let time_zone = match request.time_zone.take() {
-            Some(time_zone) => time_zone,
-            None => self
-                .host_providers
-                .time_zone_mut()
-                .ok_or(ExecutionError::MissingTimeZoneProvider)?
-                .default_time_zone_identifier()
-                .map_err(ExecutionError::TimeZoneProvider)?,
-        };
-        request.time_zone = Some(self.canonicalize_intl_time_zone(&time_zone)?);
-        let creation = self
-            .host_providers
-            .intl_mut()
-            .ok_or(ExecutionError::MissingIntlProvider)?
-            .create_date_time_format(request)
-            .map_err(ExecutionError::IntlProvider)?;
+        let creation = self.create_intl_date_time_format(request)?;
         let prototype_atom = self.prototype_atom()?;
         let default_prototype = self
             .realm
@@ -108,6 +93,51 @@ impl Isolate {
             return self.write(site.caller_base, site.destination, formatter);
         }
         self.begin_intl_date_time_format_chain(site, legacy_receiver, formatter)
+    }
+
+    /// Canonicalizes the host-selected zone before handing one provider-neutral request to Intl.
+    fn create_intl_date_time_format(
+        &mut self,
+        mut request: IntlDateTimeFormatRequest,
+    ) -> Result<IntlDateTimeFormatCreation, ExecutionError> {
+        let time_zone = match request.time_zone.take() {
+            Some(time_zone) => time_zone,
+            None => self
+                .host_providers
+                .time_zone_mut()
+                .ok_or(ExecutionError::MissingTimeZoneProvider)?
+                .default_time_zone_identifier()
+                .map_err(ExecutionError::TimeZoneProvider)?,
+        };
+        request.time_zone = Some(self.canonicalize_intl_time_zone(&time_zone)?);
+        self.host_providers
+            .intl_mut()
+            .ok_or(ExecutionError::MissingIntlProvider)?
+            .create_date_time_format(request)
+            .map_err(ExecutionError::IntlProvider)
+    }
+
+    /// Formats a Date locale method result directly from owned provider state without a JS wrapper.
+    fn finish_intl_date_to_locale(
+        &mut self,
+        site: NativeContinuationSite,
+        milliseconds: i64,
+        request: IntlDateTimeFormatRequest,
+    ) -> Result<(), ExecutionError> {
+        let creation = self.create_intl_date_time_format(request)?;
+        let offset =
+            self.intl_time_zone_offset_milliseconds(&creation.resolved.time_zone, milliseconds)?;
+        let formatted = creation
+            .backend
+            .format(IntlDateTimeInput {
+                utc_milliseconds: milliseconds,
+                offset_milliseconds: offset,
+            })
+            .map_err(ExecutionError::IntlProvider)?;
+        let value = self.allocate_runtime_string(
+            JsString::try_from_utf16(&formatted).map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        self.write(site.caller_base, site.destination, value)
     }
 
     /// Filters the synchronously canonicalized locale list through provider capability data.

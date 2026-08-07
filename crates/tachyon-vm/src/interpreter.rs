@@ -1,6 +1,7 @@
 //! Bytecode loading and explicit-fiber interpreter state machine.
 
 use super::*;
+use crate::builtins::DateTimeLocaleKind;
 use crate::module::ModuleBindingTarget;
 use crate::property::{ArrayLengthSetConsumer, TypedArrayIndexSetMode};
 use crate::runtime::callable::TypedArrayCallbackKind;
@@ -6646,23 +6647,26 @@ impl Isolate {
                     let value = self.date_to_utc_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
-                FunctionExecutable::Native(
-                    NativeFunction::DateToString | NativeFunction::DateToLocaleString,
-                ) => {
+                FunctionExecutable::Native(NativeFunction::DateToString) => {
                     let value = self.date_to_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
-                FunctionExecutable::Native(
-                    NativeFunction::DateToDateString | NativeFunction::DateToLocaleDateString,
-                ) => {
+                FunctionExecutable::Native(NativeFunction::DateToDateString) => {
                     let value = self.date_to_date_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
-                FunctionExecutable::Native(
-                    NativeFunction::DateToTimeString | NativeFunction::DateToLocaleTimeString,
-                ) => {
+                FunctionExecutable::Native(NativeFunction::DateToTimeString) => {
                     let value = self.date_to_time_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::DateToLocaleString) => {
+                    return self.begin_date_to_locale(&site, DateTimeLocaleKind::Any);
+                }
+                FunctionExecutable::Native(NativeFunction::DateToLocaleDateString) => {
+                    return self.begin_date_to_locale(&site, DateTimeLocaleKind::Date);
+                }
+                FunctionExecutable::Native(NativeFunction::DateToLocaleTimeString) => {
+                    return self.begin_date_to_locale(&site, DateTimeLocaleKind::Time);
                 }
                 FunctionExecutable::Native(NativeFunction::DateToPrimitive) => {
                     return self.begin_date_to_primitive(&site);
