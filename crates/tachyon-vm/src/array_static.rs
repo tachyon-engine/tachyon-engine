@@ -15,6 +15,7 @@ enum ArrayStaticKind {
     TypedArrayFromList,
     FromArrayLike,
     FromIterable,
+    IntlStringList,
 }
 
 /// GC-owned inputs and cursor state shared by static Array algorithms.
@@ -309,7 +310,9 @@ impl Isolate {
                 Err(ExecutionError::MissingNativeContinuation)
             }
             ArrayStaticKind::FromArrayLike => self.advance_array_from_array_like(site, state),
-            ArrayStaticKind::FromIterable => self.advance_array_from_iterable(site, state),
+            ArrayStaticKind::FromIterable | ArrayStaticKind::IntlStringList => {
+                self.advance_array_from_iterable(site, state)
+            }
         }
     }
 
@@ -370,7 +373,9 @@ impl Isolate {
                 self.advance_array_from_iterable(site, state)
             }
             ArrayStaticKind::FromArrayLike => self.advance_array_from_array_like(site, state),
-            ArrayStaticKind::FromIterable => self.advance_array_from_iterable(site, state),
+            ArrayStaticKind::FromIterable | ArrayStaticKind::IntlStringList => {
+                self.advance_array_from_iterable(site, state)
+            }
         }
     }
 

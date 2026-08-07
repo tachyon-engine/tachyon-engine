@@ -457,6 +457,14 @@ impl Isolate {
                     |object| &mut object.ordinary,
                 )?;
             }
+            ObjectReceiver::IntlListFormat(list_format) => {
+                self.set_embedded_object_prototype(
+                    list_format,
+                    self.types.intl_list_format_object,
+                    prototype,
+                    |object| &mut object.ordinary,
+                )?;
+            }
             ObjectReceiver::IntlDateTimeFormat(date_time_format) => {
                 self.set_embedded_object_prototype(
                     date_time_format,
@@ -1246,6 +1254,21 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::IntlLocale(locale), ordinary));
         }
+        if let Ok(list_format) = self
+            .heap
+            .checked_reference(raw, self.types.intl_list_format_object)
+        {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let list_format = scope.root(list_format).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(list_format, self.types.intl_list_format_object)
+                        .map(|list_format| list_format.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::IntlListFormat(list_format), ordinary));
+        }
         if let Ok(number_format) = self
             .heap
             .checked_reference(raw, self.types.intl_number_format_object)
@@ -1687,6 +1710,12 @@ impl Isolate {
                 extensible,
                 |object| &mut object.ordinary,
             ),
+            ObjectReceiver::IntlListFormat(list_format) => self.set_embedded_object_extensible(
+                list_format,
+                self.types.intl_list_format_object,
+                extensible,
+                |object| &mut object.ordinary,
+            ),
             ObjectReceiver::IntlDateTimeFormat(date_time_format) => self
                 .set_embedded_object_extensible(
                     date_time_format,
@@ -2077,6 +2106,12 @@ impl Isolate {
             ObjectReceiver::IntlLocale(locale) => self.set_embedded_object_shape(
                 locale,
                 self.types.intl_locale_object,
+                shape,
+                |object| &mut object.ordinary,
+            ),
+            ObjectReceiver::IntlListFormat(list_format) => self.set_embedded_object_shape(
+                list_format,
+                self.types.intl_list_format_object,
                 shape,
                 |object| &mut object.ordinary,
             ),
@@ -2570,6 +2605,13 @@ impl Isolate {
             ObjectReceiver::IntlLocale(locale) => self.update_embedded_object_storage(
                 locale,
                 self.types.intl_locale_object,
+                shape,
+                storage,
+                |object| &mut object.ordinary,
+            ),
+            ObjectReceiver::IntlListFormat(list_format) => self.update_embedded_object_storage(
+                list_format,
+                self.types.intl_list_format_object,
                 shape,
                 storage,
                 |object| &mut object.ordinary,
@@ -3124,6 +3166,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.intl_locale_object)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.intl_list_format_object)
                 .is_ok()
             || self
                 .heap

@@ -3,6 +3,7 @@
 use super::super::*;
 use crate::async_function::AsyncFunctionState;
 use crate::async_module::AsyncModuleState;
+use crate::builtins::PendingIntlListFormat;
 use crate::builtins::PendingIntlLocale;
 use crate::builtins::signals::PendingSignalWatcherOperation;
 use crate::builtins::typed_array::PendingTypedArrayConstruction;
@@ -789,6 +790,11 @@ pub(crate) enum NativeFunction {
     IntlLocaleMinimize,
     IntlGetCanonicalLocales,
     IntlSupportedValuesOf,
+    IntlListFormatConstructor,
+    IntlListFormatFormat,
+    IntlListFormatFormatToParts,
+    IntlListFormatResolvedOptions,
+    IntlListFormatSupportedLocalesOf,
     IntlCollatorConstructor,
     IntlCollatorCompareGetter,
     IntlCollatorCompare,
@@ -1174,6 +1180,7 @@ impl NativeFunction {
                 | Self::WeakRefConstructor
                 | Self::FinalizationRegistryConstructor
                 | Self::IntlLocaleConstructor
+                | Self::IntlListFormatConstructor
                 | Self::IntlCollatorConstructor
                 | Self::IntlDateTimeFormatConstructor
                 | Self::IntlNumberFormatConstructor
@@ -1612,6 +1619,7 @@ impl NativeFunction {
             | Self::IntlCollatorSupportedLocalesOf
             | Self::IntlDateTimeFormatSupportedLocalesOf
             | Self::IntlNumberFormatSupportedLocalesOf => 1,
+            Self::IntlListFormatSupportedLocalesOf => 1,
             Self::IntlLocaleToString
             | Self::IntlLocaleBaseName
             | Self::IntlLocaleLanguage
@@ -1626,6 +1634,8 @@ impl NativeFunction {
             | Self::IntlLocaleNumberingSystem
             | Self::IntlLocaleMaximize
             | Self::IntlLocaleMinimize
+            | Self::IntlListFormatConstructor
+            | Self::IntlListFormatResolvedOptions
             | Self::IntlCollatorCompareGetter
             | Self::IntlCollatorResolvedOptions
             | Self::IntlCollatorConstructor
@@ -1636,6 +1646,8 @@ impl NativeFunction {
             | Self::IntlNumberFormatResolvedOptions
             | Self::IntlNumberFormatConstructor => 0,
             Self::IntlCollatorCompare
+            | Self::IntlListFormatFormat
+            | Self::IntlListFormatFormatToParts
             | Self::IntlDateTimeFormatFormat
             | Self::IntlDateTimeFormatFormatToParts
             | Self::IntlNumberFormatFormat
@@ -2073,6 +2085,11 @@ impl NativeFunction {
             Self::IntlLocaleMinimize => "minimize",
             Self::IntlGetCanonicalLocales => "getCanonicalLocales",
             Self::IntlSupportedValuesOf => "supportedValuesOf",
+            Self::IntlListFormatConstructor => "ListFormat",
+            Self::IntlListFormatFormat => "format",
+            Self::IntlListFormatFormatToParts => "formatToParts",
+            Self::IntlListFormatResolvedOptions => "resolvedOptions",
+            Self::IntlListFormatSupportedLocalesOf => "supportedLocalesOf",
             Self::IntlCollatorConstructor => "Collator",
             Self::IntlCollatorCompareGetter => "get compare",
             Self::IntlCollatorCompare => "",
@@ -2421,6 +2438,7 @@ pub(crate) enum ObjectReceiver {
     Date(GcRef<DateObject>),
     IntlCollator(GcRef<IntlCollatorObject>),
     IntlDateTimeFormat(GcRef<IntlDateTimeFormatObject>),
+    IntlListFormat(GcRef<IntlListFormatObject>),
     IntlLocale(GcRef<IntlLocaleObject>),
     IntlNumberFormat(GcRef<IntlNumberFormatObject>),
     Number(GcRef<NumberObject>),
@@ -2466,6 +2484,7 @@ impl ObjectReceiver {
             Self::IntlDateTimeFormat(date_time_format) => {
                 Value::from_heap_ref(date_time_format.raw())
             }
+            Self::IntlListFormat(list_format) => Value::from_heap_ref(list_format.raw()),
             Self::IntlLocale(locale) => Value::from_heap_ref(locale.raw()),
             Self::IntlNumberFormat(number_format) => Value::from_heap_ref(number_format.raw()),
             Self::Number(number) => Value::from_heap_ref(number.raw()),
@@ -2703,6 +2722,8 @@ pub(crate) struct VmTypes {
     pub(crate) intl_date_time_format_payload: GcType<IntlDateTimeFormatPayload>,
     pub(crate) intl_date_time_format_object: GcType<IntlDateTimeFormatObject>,
     pub(crate) intl_locale_object: GcType<IntlLocaleObject>,
+    pub(crate) intl_list_format_object: GcType<IntlListFormatObject>,
+    pub(crate) pending_intl_list_format: GcType<PendingIntlListFormat>,
     pub(crate) pending_intl_locale: GcType<PendingIntlLocale>,
     pub(crate) pending_intl_date_time_format: GcType<PendingIntlDateTimeFormat>,
     pub(crate) pending_intl_collator: GcType<PendingIntlCollator>,
@@ -2883,6 +2904,8 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidLocaleListElement(_)
         | ExecutionError::IncompatibleIntlCollatorReceiver(_)
         | ExecutionError::IncompatibleIntlDateTimeFormatReceiver(_)
+        | ExecutionError::IncompatibleIntlListFormatReceiver(_)
+        | ExecutionError::InvalidIntlListFormatElement(_)
         | ExecutionError::IntlDateTimeFormatStyleConflict
         | ExecutionError::IncompatibleIntlNumberFormatReceiver(_)
         | ExecutionError::MissingIntlNumberFormatCurrency
@@ -2919,6 +2942,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidIntlSupportedValuesKey
         | ExecutionError::InvalidIntlCollatorOption
         | ExecutionError::InvalidIntlDateTimeFormatOption
+        | ExecutionError::InvalidIntlListFormatOption
         | ExecutionError::InvalidIntlNumberFormatOption
         | ExecutionError::InvalidLanguageTag => Some(NativeErrorKind::Range),
         ExecutionError::InvalidUriEncoding => Some(NativeErrorKind::Uri),

@@ -187,6 +187,7 @@ impl Isolate {
             IntrinsicPrototypeKind::Date => realm.date_prototype,
             IntrinsicPrototypeKind::IntlCollator => realm.intl_collator_prototype,
             IntrinsicPrototypeKind::IntlDateTimeFormat => realm.intl_date_time_format_prototype,
+            IntrinsicPrototypeKind::IntlListFormat => realm.intl_list_format_prototype,
             IntrinsicPrototypeKind::IntlLocale => realm.intl_locale_prototype,
             IntrinsicPrototypeKind::IntlNumberFormat => realm.intl_number_format_prototype,
             IntrinsicPrototypeKind::SignalState => realm.signal_state_prototype,
@@ -645,6 +646,12 @@ impl Isolate {
                 .map_err(IsolateCreationError::TypeRegistration)?,
             intl_locale_object: registry
                 .try_register("IntlLocaleObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            intl_list_format_object: registry
+                .try_register("IntlListFormatObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_intl_list_format: registry
+                .try_register("PendingIntlListFormat")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             pending_intl_locale: registry
                 .try_register("PendingIntlLocale")
@@ -1988,6 +1995,51 @@ impl Isolate {
         self.realm.retain_construction_value(value)
     }
 
+    /// Allocates one branded ListFormat while tracing its locale and ordinary object state.
+    pub(crate) fn allocate_intl_list_format_object(
+        &mut self,
+        locale: Value,
+        list_type: IntlListFormatType,
+        style: IntlListFormatStyle,
+        prototype: Value,
+        space: AllocationSpace,
+    ) -> Result<Value, ExecutionError> {
+        debug_assert!(self.is_string_value(locale));
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
+            finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
+            realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
+            loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
+        };
+        let value = self
+            .heap
+            .try_allocate_with_gc(
+                self.types.intl_list_format_object,
+                0,
+                0,
+                IntlListFormatObject {
+                    locale,
+                    list_type,
+                    style,
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype,
+                    },
+                },
+                space,
+                roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)?;
+        self.realm.retain_construction_value(value)
+    }
+
     /// Allocates a boxed Symbol while tracing its optional primitive data and object prototype.
     pub(crate) fn allocate_symbol_object(
         &mut self,
@@ -2463,7 +2515,13 @@ impl Isolate {
                     continue;
                 };
                 let Some(property) = entry.property else {
-                    keys.insert(key);
+                    if keys.insert(key)
+                        && self
+                            .complete_own_property_descriptor(current, key)?
+                            .is_some_and(|descriptor| descriptor.enumerable() == Some(true))
+                    {
+                        keys.push_enumerable(key);
+                    }
                     continue;
                 };
                 if keys.insert(key) && property.attributes.enumerable() {
@@ -2511,6 +2569,12 @@ impl Isolate {
                 Err(_) => 0,
             };
             let (_, snapshot) = self.object_snapshot(current)?;
+            let dense_count = self.dense_array_indices(current)?.len();
+            let typed_array_count = if self.is_typed_array_value(current) {
+                self.typed_array_snapshot(current)?.length
+            } else {
+                0
+            };
             count = count
                 .checked_add(virtual_count)
                 .and_then(|count| {
@@ -2518,6 +2582,8 @@ impl Isolate {
                         .ok()
                         .and_then(|properties| count.checked_add(properties))
                 })
+                .and_then(|count| count.checked_add(dense_count))
+                .and_then(|count| count.checked_add(typed_array_count))
                 .ok_or(ExecutionError::ForInKeyAllocationFailed)?;
             if snapshot.prototype.as_immediate() == Some(Immediate::Null) {
                 return Ok(count);

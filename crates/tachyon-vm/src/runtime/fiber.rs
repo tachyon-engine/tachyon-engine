@@ -356,6 +356,7 @@ pub(crate) enum ConversionConsumer {
     IntlLocaleListElement,
     IntlLocaleTag,
     IntlLocaleOption,
+    IntlListFormatOption,
     IntlSupportedValuesKey,
     IntlCollatorOption,
     IntlNumberFormatStringOption,
@@ -525,6 +526,7 @@ impl ConversionConsumer {
             | Self::IntlLocaleListElement
             | Self::IntlLocaleTag
             | Self::IntlLocaleOption
+            | Self::IntlListFormatOption
             | Self::IntlSupportedValuesKey
             | Self::IntlCollatorOption
             | Self::IntlNumberFormatStringOption
@@ -689,6 +691,7 @@ impl ConversionConsumer {
                 | Self::IntlLocaleListElement
                 | Self::IntlLocaleTag
                 | Self::IntlLocaleOption
+                | Self::IntlListFormatOption
                 | Self::IntlSupportedValuesKey
                 | Self::IntlCollatorOption
                 | Self::IntlNumberFormatStringOption
@@ -782,6 +785,7 @@ impl ConversionConsumer {
                 | Self::IntlLocaleListElement
                 | Self::IntlLocaleTag
                 | Self::IntlLocaleOption
+                | Self::IntlListFormatOption
                 | Self::IntlSupportedValuesKey
                 | Self::IntlCollatorOption
                 | Self::IntlNumberFormatStringOption
@@ -925,6 +929,7 @@ pub(crate) enum PropertyCallbackMode {
     IntlNumberFormat,
     IntlDateTimeFormat,
     IntlLocale,
+    IntlListFormat,
     CopyDataProperties,
     DefineProperties,
 }
@@ -1781,6 +1786,18 @@ pub(crate) enum IntlLocaleStage {
     NumberingSystem,
 }
 
+/// Observable boundaries in ListFormat locale negotiation and option processing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum IntlListFormatStage {
+    Locales,
+    LocaleMatcher,
+    Type,
+    Style,
+    Format,
+    FormatToParts,
+}
+
 /// Observable boundaries in `Intl.Collator` construction and locale filtering.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -2003,6 +2020,7 @@ pub(crate) enum NativeContinuationKind {
     TypedArraySubarray(TypedArraySubarrayStage),
     IntlLocaleList(IntlLocaleListStage),
     IntlLocale(IntlLocaleStage),
+    IntlListFormat(IntlListFormatStage),
     IntlCollator(IntlCollatorStage),
     IntlNumberFormat(IntlNumberFormatStage),
     IntlDateTimeFormat(IntlDateTimeFormatStage),
@@ -2201,6 +2219,37 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::IntlLocale(stage),
+            first: state,
+            second: options,
+        }
+    }
+
+    /// Roots pending ListFormat state across locale-list or option callbacks.
+    #[inline]
+    pub(crate) const fn intl_list_format(
+        site: NativeContinuationSite,
+        stage: IntlListFormatStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::IntlListFormat(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots pending ListFormat state while one ordinary option getter executes JavaScript.
+    #[inline]
+    pub(crate) const fn intl_list_format_property_get(
+        site: NativeContinuationSite,
+        state: Value,
+        options: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PropertyGet(PropertyCallbackMode::IntlListFormat),
             first: state,
             second: options,
         }

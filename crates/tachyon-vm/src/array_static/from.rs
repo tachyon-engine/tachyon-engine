@@ -27,7 +27,11 @@ impl Isolate {
             stage,
             ArrayStaticStage::MapperCall | ArrayStaticStage::Define
         ) || snapshot.close_on_abrupt;
-        Ok((snapshot.kind == ArrayStaticKind::FromIterable && close).then_some(snapshot.iterator))
+        Ok((matches!(
+            snapshot.kind,
+            ArrayStaticKind::FromIterable | ArrayStaticKind::IntlStringList
+        ) && close)
+            .then_some(snapshot.iterator))
     }
 
     /// Captures the source and mapper before the first observable iterator lookup.
@@ -143,7 +147,16 @@ impl Isolate {
         site: NativeContinuationSite,
         source: Value,
     ) -> Result<(), ExecutionError> {
-        self.begin_source_to_list(site, source, true)
+        self.begin_source_to_list(site, source, true, ArrayStaticKind::FromIterable)
+    }
+
+    /// Collects a required iterable while rejecting non-String elements before the next step.
+    pub(crate) fn begin_intl_string_list(
+        &mut self,
+        site: NativeContinuationSite,
+        source: Value,
+    ) -> Result<(), ExecutionError> {
+        self.begin_source_to_list(site, source, true, ArrayStaticKind::IntlStringList)
     }
 
     /// Collects a source with an already resolved iterator method into an intrinsic Array.
@@ -182,6 +195,7 @@ impl Isolate {
         site: NativeContinuationSite,
         source: Value,
         require_iterable: bool,
+        kind: ArrayStaticKind,
     ) -> Result<(), ExecutionError> {
         let undefined = Value::from_immediate(Immediate::Undefined);
         let state = self.allocate_array_static_state(PendingArrayStatic {
@@ -195,7 +209,7 @@ impl Isolate {
             next_method: undefined,
             iterator_result: undefined,
             arguments: Box::new([]),
-            kind: ArrayStaticKind::FromIterable,
+            kind,
             cursor: 0,
             length: 0,
             mapping: false,
@@ -276,13 +290,14 @@ impl Isolate {
         }
         self.resolve_function_object(method)?;
         self.set_array_static_value(state, |pending| &mut pending.next_method, method)?;
-        let typed_array =
-            self.array_static_snapshot(state)?.kind == ArrayStaticKind::TypedArrayFromArrayLike;
+        let current_kind = self.array_static_snapshot(state)?.kind;
         self.update_array_static_scalars(state, |pending| {
-            pending.kind = if typed_array {
-                ArrayStaticKind::TypedArrayCollectIterable
-            } else {
-                ArrayStaticKind::FromIterable
+            pending.kind = match current_kind {
+                ArrayStaticKind::TypedArrayFromArrayLike => {
+                    ArrayStaticKind::TypedArrayCollectIterable
+                }
+                ArrayStaticKind::IntlStringList => ArrayStaticKind::IntlStringList,
+                _ => ArrayStaticKind::FromIterable,
             };
             pending.length = 0;
         })?;
@@ -544,6 +559,9 @@ impl Isolate {
         &mut self,
         snapshot: ArrayStaticSnapshot,
     ) -> Result<bool, ExecutionError> {
+        if snapshot.kind == ArrayStaticKind::IntlStringList {
+            return Ok(false);
+        }
         if (snapshot.mapping && snapshot.kind != ArrayStaticKind::TypedArrayCollectIterable)
             || snapshot.iterator.as_immediate() == Some(Immediate::Undefined)
         {
@@ -633,6 +651,12 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         self.set_array_static_value(state, |pending| &mut pending.retained, value)?;
         let snapshot = self.array_static_snapshot(state)?;
+        if snapshot.kind == ArrayStaticKind::IntlStringList {
+            self.update_array_static_scalars(state, |pending| pending.close_on_abrupt = true)?;
+            if !self.is_string_value(value) {
+                return Err(ExecutionError::InvalidIntlListFormatElement(value));
+            }
+        }
         if snapshot.mapping && snapshot.kind != ArrayStaticKind::TypedArrayCollectIterable {
             self.update_array_static_scalars(state, |pending| pending.close_on_abrupt = true)?;
             return self.call_array_static(

@@ -623,6 +623,16 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::IntlListFormatOption {
+                        let state =
+                            self.pending_intl_list_format_reference(continuation.receiver)?;
+                        let string = self.primitive_to_string_value(value)?;
+                        return self.resume_intl_list_format_option_string(
+                            continuation.site,
+                            state,
+                            string,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::IntlSupportedValuesKey {
                         let key = self.primitive_to_string_value(value)?;
                         return self.finish_intl_supported_values_of(continuation.site, key);
@@ -1807,6 +1817,7 @@ impl Isolate {
                 | ConversionConsumer::IntlLocaleListElement
                 | ConversionConsumer::IntlLocaleTag
                 | ConversionConsumer::IntlLocaleOption
+                | ConversionConsumer::IntlListFormatOption
                 | ConversionConsumer::IntlSupportedValuesKey => {
                     unreachable!("Intl locale-list conversion resumes inside its state machine")
                 }

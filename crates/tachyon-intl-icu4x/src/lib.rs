@@ -9,6 +9,7 @@
 
 mod collator;
 mod date_time_format;
+mod list_format;
 mod number_format;
 mod supported_values;
 mod tuning;
@@ -223,6 +224,29 @@ impl IntlProvider for Icu4xIntlProvider {
         matcher: IntlLocaleMatcher,
     ) -> Result<Box<[Box<str>]>, HostProviderError> {
         Ok(collator::supported_locales(locales, matcher))
+    }
+
+    fn create_list_format(
+        &mut self,
+        request: tachyon_vm::IntlListFormatRequest,
+    ) -> Result<tachyon_vm::IntlListFormatResolved, HostProviderError> {
+        list_format::create(&self.default_locale, request)
+    }
+
+    fn format_list(
+        &mut self,
+        resolved: &tachyon_vm::IntlListFormatResolved,
+        elements: &[Box<[u16]>],
+    ) -> Result<tachyon_vm::IntlFormattedListParts, HostProviderError> {
+        list_format::format(resolved, elements)
+    }
+
+    fn list_format_supported_locales(
+        &mut self,
+        locales: &[Box<str>],
+        matcher: IntlLocaleMatcher,
+    ) -> Result<Box<[Box<str>]>, HostProviderError> {
+        Ok(list_format::supported_locales(locales, matcher))
     }
 
     fn create_number_format(

@@ -7,8 +7,8 @@ use tachyon_value::{RawHeapRef, Value};
 
 use crate::{
     AtomId, CodeId, IntlCollatorBackend, IntlCollatorCaseFirst, IntlCollatorSensitivity,
-    IntlCollatorUsage, IntlDateTimeFormatBackend, IntlDateTimeFormatResolved,
-    IntlNumberFormatBackend, IntlNumberFormatResolved, tuning::objects,
+    IntlCollatorUsage, IntlDateTimeFormatBackend, IntlDateTimeFormatResolved, IntlListFormatStyle,
+    IntlListFormatType, IntlNumberFormatBackend, IntlNumberFormatResolved, tuning::objects,
 };
 use tachyon_bytecode::FunctionId;
 
@@ -634,6 +634,16 @@ pub(crate) struct IntlLocaleObject {
     pub(crate) ordinary: OrdinaryObject,
 }
 
+/// Branded `Intl.ListFormat` object carrying resolved scalar slots and ordinary state.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct IntlListFormatObject {
+    pub(crate) locale: Value,
+    pub(crate) list_type: IntlListFormatType,
+    pub(crate) style: IntlListFormatStyle,
+    pub(crate) ordinary: OrdinaryObject,
+}
+
 /// Ordinary wrapper carrying the specification's optional `[[SymbolData]]` slot.
 ///
 /// `%Symbol.prototype%` is itself a Symbol exotic object with an absent slot, while values
@@ -1030,6 +1040,14 @@ impl Trace for StringObject {
 }
 
 impl Trace for IntlLocaleObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.locale.trace(tracer);
+        self.ordinary.trace(tracer);
+    }
+}
+
+impl Trace for IntlListFormatObject {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.locale.trace(tracer);

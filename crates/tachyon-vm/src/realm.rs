@@ -4112,6 +4112,85 @@ impl Isolate {
         let supported_values_atom = self.intern_intrinsic_name(b"supportedValuesOf")?;
         self.set_intrinsic_data_property(object, supported_values_atom, supported_values, true)?;
 
+        let list_format_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        self.realm.intl_list_format_prototype = Some(list_format_prototype);
+        let list_format_constructor = self.allocate_native_function(
+            NativeFunction::IntlListFormatConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.intl_list_format_constructor = Some(list_format_constructor);
+        self.set_function_prototype(list_format_constructor, list_format_prototype)?;
+        self.set_intrinsic_data_property(
+            list_format_prototype,
+            constructor_atom,
+            list_format_constructor,
+            true,
+        )?;
+        let list_format_atom = self.intern_intrinsic_name(b"ListFormat")?;
+        self.set_intrinsic_data_property(object, list_format_atom, list_format_constructor, true)?;
+        for (name, native) in [
+            (b"format".as_slice(), NativeFunction::IntlListFormatFormat),
+            (
+                b"formatToParts".as_slice(),
+                NativeFunction::IntlListFormatFormatToParts,
+            ),
+            (
+                b"resolvedOptions".as_slice(),
+                NativeFunction::IntlListFormatResolvedOptions,
+            ),
+        ] {
+            self.install_collection_method(
+                list_format_prototype,
+                function_prototype,
+                name,
+                native,
+            )?;
+        }
+        let list_format_supported_locales = self.allocate_native_function(
+            NativeFunction::IntlListFormatSupportedLocalesOf,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let supported_locales_atom = self.intern_intrinsic_name(b"supportedLocalesOf")?;
+        self.set_intrinsic_data_property(
+            list_format_constructor,
+            supported_locales_atom,
+            list_format_supported_locales,
+            true,
+        )?;
+        let list_format_tag_atom = self.intern_intrinsic_name(b"Intl.ListFormat")?;
+        let list_format_tag = self.atom_string_value(list_format_tag_atom)?;
+        let to_string_tag = self.property_key(
+            self.agent
+                .well_known_symbols
+                .to_string_tag
+                .expect("well-known symbols initialize before Intl.ListFormat"),
+        )?;
+        self.define_data_property(
+            list_format_prototype,
+            to_string_tag,
+            DataPropertyDescriptor {
+                value: Some(list_format_tag),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+
         let collator_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
             shape: ShapeId::EMPTY,
             extensible: true,
@@ -4179,7 +4258,6 @@ impl Isolate {
                 prototype: function_prototype,
             },
         )?;
-        let supported_locales_atom = self.intern_intrinsic_name(b"supportedLocalesOf")?;
         self.set_intrinsic_data_property(
             collator_constructor,
             supported_locales_atom,

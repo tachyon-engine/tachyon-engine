@@ -274,6 +274,66 @@ pub struct IntlCollatorCreation {
     pub backend: Box<dyn IntlCollatorBackend>,
 }
 
+/// Semantic list type selected by `Intl.ListFormat`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlListFormatType {
+    #[default]
+    Conjunction,
+    Disjunction,
+    Unit,
+}
+
+/// Pattern width selected by `Intl.ListFormat`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlListFormatStyle {
+    #[default]
+    Long,
+    Short,
+    Narrow,
+}
+
+/// Fully converted constructor request passed to the list-format provider.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct IntlListFormatRequest {
+    pub locales: Box<[Box<str>]>,
+    pub locale_matcher: IntlLocaleMatcher,
+    pub list_type: IntlListFormatType,
+    pub style: IntlListFormatStyle,
+}
+
+/// Immutable slots stored by one initialized ListFormat object.
+#[derive(Debug, Eq, PartialEq)]
+pub struct IntlListFormatResolved {
+    pub locale: Box<str>,
+    pub list_type: IntlListFormatType,
+    pub style: IntlListFormatStyle,
+}
+
+/// Part classification emitted directly by a list-format provider.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntlListFormatPartType {
+    Element,
+    Literal,
+}
+
+/// One gap-free UTF-16 span in a formatted list.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IntlListFormatPartSpan {
+    pub kind: IntlListFormatPartType,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// Provider-owned formatted UTF-16 list and its ordered semantic spans.
+#[derive(Debug, Eq, PartialEq)]
+pub struct IntlFormattedListParts {
+    pub formatted: Box<[u16]>,
+    pub spans: Box<[IntlListFormatPartSpan]>,
+}
+
 /// High-level presentation style selected by `Intl.NumberFormat`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u8)]
@@ -872,6 +932,32 @@ pub trait IntlProvider: Send {
 
     /// Filters canonical requested locales while preserving their original canonical spelling.
     fn collator_supported_locales(
+        &mut self,
+        _locales: &[Box<str>],
+        _matcher: IntlLocaleMatcher,
+    ) -> Result<Box<[Box<str>]>, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+
+    /// Resolves ListFormat locale and scalar options without retaining provider borrows.
+    fn create_list_format(
+        &mut self,
+        _request: IntlListFormatRequest,
+    ) -> Result<IntlListFormatResolved, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+
+    /// Formats already validated ECMAScript String elements into typed UTF-16 parts.
+    fn format_list(
+        &mut self,
+        _resolved: &IntlListFormatResolved,
+        _elements: &[Box<[u16]>],
+    ) -> Result<IntlFormattedListParts, HostProviderError> {
+        Err(HostProviderError::Unavailable)
+    }
+
+    /// Filters canonical requested locales using ListFormat locale data.
+    fn list_format_supported_locales(
         &mut self,
         _locales: &[Box<str>],
         _matcher: IntlLocaleMatcher,

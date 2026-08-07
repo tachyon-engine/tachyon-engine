@@ -2464,6 +2464,7 @@ impl Isolate {
                         | PropertyCallbackMode::IntlNumberFormat
                         | PropertyCallbackMode::IntlDateTimeFormat
                         | PropertyCallbackMode::IntlLocale
+                        | PropertyCallbackMode::IntlListFormat
                 ) {
                     continuation.second()
                 } else {
@@ -2670,6 +2671,7 @@ impl Isolate {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::IntlLocale(_) => (continuation.second(), 0, None, 0),
+            NativeContinuationKind::IntlListFormat(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::IntlCollator(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::IntlNumberFormat(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::IntlDateTimeFormat(_) => (continuation.second(), 0, None, 0),
@@ -5501,6 +5503,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::IntlLocaleConstructor) => {
                     return self.begin_intl_locale_constructor(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::IntlListFormatConstructor) => {
+                    return self.begin_intl_list_format_constructor(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::IntlCollatorConstructor) => {
                     return self.begin_intl_collator_constructor(&site);
                 }
@@ -8048,6 +8053,21 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::IntlSupportedValuesOf) => {
                     return self.begin_intl_supported_values_of(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::IntlListFormatConstructor) => {
+                    return self.begin_intl_list_format_constructor(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlListFormatSupportedLocalesOf) => {
+                    return self.begin_intl_list_format_supported_locales_of(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlListFormatFormat) => {
+                    return self.begin_intl_list_format_format(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlListFormatFormatToParts) => {
+                    return self.begin_intl_list_format_format_to_parts(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IntlListFormatResolvedOptions) => {
+                    return self.intl_list_format_resolved_options(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::IntlCollatorConstructor) => {
                     return self.begin_intl_collator_constructor(&site);
                 }
@@ -8899,6 +8919,11 @@ impl Isolate {
                         let state = self.pending_intl_locale_reference(continuation.first())?;
                         let stage = self.pending_intl_locale_stage(state)?;
                         self.resume_pending_intl_locale(continuation, stage, value)
+                    } else if mode == PropertyCallbackMode::IntlListFormat {
+                        let state =
+                            self.pending_intl_list_format_reference(continuation.first())?;
+                        let stage = self.pending_intl_list_format_stage(state)?;
+                        self.resume_intl_list_format(continuation, stage, value)
                     } else if mode == PropertyCallbackMode::Descriptor {
                         let state =
                             self.pending_property_descriptor_reference(continuation.first())?;
@@ -9029,6 +9054,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::IntlLocale(stage) => {
                     self.resume_pending_intl_locale(continuation, stage, value)
+                }
+                NativeContinuationKind::IntlListFormat(stage) => {
+                    self.resume_intl_list_format(continuation, stage, value)
                 }
                 NativeContinuationKind::IntlCollator(stage) => {
                     self.resume_intl_collator(continuation, stage, value)
